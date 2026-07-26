@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.13 - 2026-07-26 (Draft)
+### Added
+- Safe `edit_file`, `verify_files`, and optional provider diagnostics for
+  bounded coding workflows with stale-edit protection.
+- Copy-on-write subagent workspaces with bounded structured diffs and explicit
+  parent-side change application.
+- Animated pet companions for the web dashboard and browser extension,
+  including pet selection, preferences, and activity-aware animation states.
+- The `hatch-pet` skill for creating, validating, and packaging animated pets.
+
+### Changed
+- Agent prompts, tool routing, confirmation metadata, and workspace context
+  now expose coding phases, read-only status, and subagent isolation details.
+- Chat and task-progress surfaces now use the selected pet as the assistant
+  visual and reflect connection, approval, activity, and error states.
+
+### Fixed
+- Coding and review subagents no longer implicitly mutate the live workspace
+  when running with automatic isolation.
+
 ## 1.0.12 - 2026-07-09
 ### Added
 - Core-only first installation with retryable optional profiles for browser,
