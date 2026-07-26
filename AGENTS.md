@@ -42,7 +42,7 @@ The heart of the system. Manages:
 - **Stable prompt cache** — the rarely-changing part of the system prompt (soul + identity + user context) is cached for 30 seconds per `(sender_id, channel)` pair. Only the volatile suffix (memory, RAG results, timestamp) is rebuilt each message.
 - **Auto-RAG** — before every LLM call, runs semantic vector search (falls back to the Markdown memory source if embeddings are unavailable). Injects matching memories into the prompt automatically.
 - **Tool execution loop** — after each LLM response, if tool calls are returned, executes them in parallel and loops back to the LLM (up to 30 iterations). Sensitive tools require user confirmation.
-- **Sub-agent delegation** — `spawn_agent` creates an isolated session that runs its own tool loop, can use named specialist profiles, and reports back to the parent session.
+- **Sub-agent delegation** — `spawn_agent` creates an isolated session that runs its own tool loop, can use named specialist profiles, defaults coding/review work to a temporary copy-on-write workspace, captures a bounded structured diff, and reports back to the parent without merging changes implicitly.
 - **Capability readiness gate** — skill, subagent, MCP, and tool discovery run through explicit startup phases. User turns wait for required skills/tools before prompt or schema construction; optional MCP failures produce `degraded` readiness rather than blocking chat. Embedding and LLM warmups are not part of the required gate.
 - **Per-session dedup** — identical consecutive messages within 2 seconds are silently dropped, keyed per session (not globally).
 - **History summarization** — when token count exceeds limit, older messages are summarized by the LLM and squashed; large tool outputs from old turns are truncated in-place.
@@ -134,12 +134,15 @@ Sandboxed OS interface. All methods check `_is_path_allowed()` before touching t
 | Tool | Requires confirmation | Description |
 |------|-----------------------|-------------|
 | `capability_search(query, include_disabled)` | No | Resolve native tools, skills, MCP servers/tools, and subagents against a redacted capability snapshot; use before claiming an integration is unavailable |
-| `read_file(path)` | No | Read file contents (20k char limit) |
+| `read_file(path, include_hash)` | No | Read file contents (20k char limit); optionally return the raw-file SHA-256 for stale-edit protection |
+| `edit_file(path, edits, expected_sha256)` | **Yes** | Apply exact, preflighted, atomic UTF-8 text edits with hash/anchor/no-op guards and a bounded diff |
 | `write_file(path, content)` | **Yes** | Create or overwrite a file |
+| `verify_files(paths, include_diagnostics)` | No | Run bounded read-only conflict-marker, syntax, TOML/JSON/Python, and Git whitespace checks; optionally invoke installed diagnostics |
+| `diagnose_files(paths, provider)` | No | Optionally run installed Ruff, Pyright, ESLint, or TypeScript diagnostics through direct subprocess arguments; missing providers return `skipped` |
 | `create_spreadsheet(path, sheets, title)` | **Yes** | Create a styled, formula-capable `.xlsx` workbook without an ad-hoc script |
 | `delete_file(path)` | **Yes** | Delete a file or directory tree |
 | `list_dir(path)` | No | List directory contents |
-| `run_command(command)` | **Yes** | Execute shell command in project root |
+| `run_command(command)` | **Yes** | Execute shell command in project root, or in the active temporary subagent workspace |
 | `calculate(expression)` | No | Safely evaluate bounded arithmetic for prices, totals, percentages, and conversions |
 | `memory_search(query)` | No | Search durable Markdown memory, using vectors when available |
 | `memory_save(content, scope)` | No | Persist an explicit fact/event to the Markdown journal or long-term memory |
@@ -155,7 +158,7 @@ Sandboxed OS interface. All methods check `_is_path_allowed()` before touching t
 | `cron_add(message, context, time_expr, cron_expr)` | No | Schedule a one-time or repeating job |
 | `cron_list()` | No | List all pending scheduled jobs |
 | `cron_remove(job_id)` | **Yes** | Cancel a scheduled job |
-| `spawn_agent(task)` | No | Delegate a long, parallelizable, or specialist-matched task to a sub-agent |
+| `spawn_agent(task, isolation)` | No | Delegate a long, parallelizable, or specialist-matched task; `auto` isolates coding/review work, `copy` always captures changes in a temporary workspace, and `none` explicitly shares the live workspace |
 | `analyze_video(source, question, detail, start, end, max_frames, resolution)` | No | Analyze an allowed local video or public HTTP(S) video and return a transcript plus up to three contact sheets. |
 
 ### `core/video/` — Native Video Analysis
@@ -183,12 +186,22 @@ long-running and belongs behind `limebot start`. One-shot commands use
 tree. Skill docs must invoke their own entrypoint, for example
 `python {baseDir}/main.py user-info` for the GitHub skill.
 
+When `spawn_agent` uses copy isolation, file tools and `run_command` are rooted
+in a temporary clone outside the live project. Parent-directory escapes and
+absolute live-project paths are rejected. The clone is deleted after the
+subagent reports a bounded structured diff; applying that diff remains an
+explicit parent-side action.
+
 **Tool result limits** (per-tool, to control context window growth):
 
 | Tool | Limit |
 |------|-------|
 | `capability_search` | 4,000 chars |
 | `read_file` | 8,000 chars |
+| `edit_file` | 8,000 chars |
+| `verify_files` | 6,000 chars |
+| `diagnose_files` | 8,000 chars |
+| `spawn_agent` | 12,000 chars |
 | `browser_extract` | 5,000 chars |
 | `browser_get_page_text` | 5,000 chars |
 | `memory_search` | 3,000 chars |
@@ -433,7 +446,7 @@ Only registered enabled skill names and their configured aliases can be invoked 
 
 **Approval policy profiles** — `APPROVAL_POLICY_PROFILE` accepts `manual`, `session`, `review`, or `autonomous`. Manual preserves the existing confirmation/session-whitelist flow; session makes that remembered-approval intent explicit; review ignores session whitelists; autonomous bypasses prompts but not hard path and command safety checks. Legacy `AUTONOMOUS_MODE=true` maps to `autonomous` only when no named profile is configured. Requests, decisions, and timeouts are appended to the session event log with redacted metadata and client source.
 
-Sensitive tools: `write_file`, `delete_file`, `run_command`, `cron_remove`
+Sensitive tools: `edit_file`, `write_file`, `delete_file`, `run_command`, `cron_remove`
 
 **Bypass conditions:**
 - `APPROVAL_POLICY_PROFILE=autonomous` in `.env` — skips confirmation for sensitive tools

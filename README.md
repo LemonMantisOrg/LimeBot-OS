@@ -35,7 +35,7 @@ graph TD
     LLM --> XML[XML Tag Interceptor: save_soul / save_identity / log_memory]
     XML --> Tools{Tool Execution Loop}
     Tools -- Requires Confirmation --> Auth[Security Gate: Web Dashboard Approval]
-    Auth -- Approved --> Exec[Execute: write_file / run_command / delete_file]
+    Auth -- Approved --> Exec[Execute: edit_file / write_file / run_command / delete_file]
     Tools -- Sensitive/No Auth --> Exec
     Exec --> Loop
     Tools -- No More Tools --> Reply[Compile Outbound Message]
@@ -74,6 +74,8 @@ Full Playwright-powered browser automation:
 ### 📁 It Has Access to Your Files
 Whitelisted filesystem operations:
 - Read, write, create, delete, move, rename files and directories
+- Apply exact hash-guarded patches to existing UTF-8 files with `edit_file`; LimeBot previews the diff, rejects stale/no-op/overlapping edits, and runs read-only verification checks afterward
+- Run optional `diagnose_files` checks with installed Ruff, Pyright, ESLint, or TypeScript tooling; missing providers return `skipped` and are never required for core verification
 - All operations sandboxed to `ALLOWED_PATHS`  nothing outside those roots is touchable unless you explicitly allow it
 - Dangerous operations (write, delete, run) require explicit confirmation through the web UI before executing
 
@@ -99,6 +101,8 @@ For complex multi-step tasks, LimeBot can delegate work to an isolated backgroun
 - Built-in specialist profiles like `reviewer`, `verifier`, and `explorer` can be recommended automatically when the request wording matches the task
 - Custom subagents can also be suggested when their descriptions overlap strongly with the current request
 - Reports back to the parent session when complete
+- Coding, repository, review, and verification work defaults to a temporary copy-on-write workspace; the report includes a bounded structured diff and changes are not merged into the live project implicitly
+- Use `isolation="copy"` to force isolation or `isolation="none"` only for an explicitly shared task
 - The web chat renders delegated results as a dedicated sub-agent report card instead of raw trace text
 - Useful for long-running research, file processing, or anything that shouldn't block the main conversation
 
@@ -173,6 +177,7 @@ Skills extend what LimeBot can do. Each skill is a folder with a `SKILL.md` (the
 | `filesystem` | Extended file operations beyond the core toolbox |
 | `discord` | Optional higher-level Discord administration helpers |
 | `docx-creator` | Create, inspect, edit, and validate Microsoft Word `.docx` documents |
+| `hatch-pet` | Create, validate, QA, and install v2 animated pets for the dashboard and browser companion |
 
 **Install community skills from GitHub:**
 ```bash
