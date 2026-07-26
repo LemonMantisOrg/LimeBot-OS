@@ -11,6 +11,7 @@ dashboard when a sensitive tool requires user approval.
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import re
 import shlex
@@ -18,11 +19,19 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from core.redaction import redact_sensitive_text
+from core.file_edits import EditValidationError, apply_text_edits, unified_text_diff
 
 
 # Tools that always require explicit user approval unless whitelisted.
 SENSITIVE_TOOLS = frozenset(
-    {"delete_file", "run_command", "write_file", "create_spreadsheet", "cron_remove"}
+    {
+        "delete_file",
+        "edit_file",
+        "run_command",
+        "write_file",
+        "create_spreadsheet",
+        "cron_remove",
+    }
 )
 
 APPROVE_WORDS = frozenset(
@@ -106,6 +115,69 @@ class ConfirmationManager:
         except Exception as e:
             preview["diff_error"] = str(e)
 
+        return preview
+
+    def build_edit_preview(self, function_args: dict) -> Dict[str, Any]:
+        """Preview an exact patch without applying it."""
+        target = str(function_args.get("path", "") or "")
+        edits = function_args.get("edits")
+        expected = str(function_args.get("expected_sha256", "") or "").lower()
+        preview: Dict[str, Any] = {
+            "kind": "edit_file",
+            "path": target,
+            "summary": f"Apply exact patch to {target or '(missing path)'}",
+            "edit_count": len(edits) if isinstance(edits, list) else 0,
+        }
+        if not target:
+            return preview
+
+        try:
+            path = Path(target).resolve()
+        except Exception:
+            return preview
+
+        preview["path"] = self.toolbox._to_display_path(path)
+        if not self.toolbox._is_path_allowed(path):
+            preview["summary"] = f"Attempt to edit outside allowed paths: {target}"
+            preview["risk_flags"] = ["outside_allowed_paths"]
+            return preview
+        if not path.exists() or not path.is_file():
+            preview["summary"] = f"Edit target is missing or not a file: {preview['path']}"
+            preview["risk_flags"] = ["path_missing"]
+            return preview
+
+        try:
+            before_bytes = path.read_bytes()
+            current_hash = hashlib.sha256(before_bytes).hexdigest()
+            preview["sha256"] = current_hash
+            if expected != current_hash:
+                preview["summary"] = (
+                    f"Reject stale edit for {preview['path']} "
+                    f"(expected {expected or '(missing)'}, current {current_hash})"
+                )
+                preview["risk_flags"] = ["stale_edit"]
+                return preview
+
+            before = before_bytes.decode("utf-8")
+            after, replacements = apply_text_edits(before, edits)
+            preview["mode"] = "edit"
+            preview["replacements"] = replacements
+            preview["summary"] = (
+                f"Apply {replacements} exact replacement(s) to {preview['path']}"
+            )
+            preview["diff"] = unified_text_diff(
+                before,
+                after,
+                fromfile=f"{preview['path']} (before)",
+                tofile=f"{preview['path']} (after)",
+                max_chars=1_800,
+            )
+        except (UnicodeDecodeError, EditValidationError) as exc:
+            preview["summary"] = f"Reject invalid edit for {preview['path']}: {exc}"
+            preview["risk_flags"] = ["invalid_edit"]
+        except Exception as exc:
+            preview["summary"] = f"Could not preview edit for {preview['path']}: {exc}"
+            preview["risk_flags"] = ["preview_error"]
         return preview
 
     def build_spreadsheet_preview(self, function_args: dict) -> Dict[str, Any]:
@@ -290,6 +362,8 @@ class ConfirmationManager:
         """Return a rich preview dict for any sensitive *function_name*."""
         if function_name == "write_file":
             preview = self.build_write_preview(function_args)
+        elif function_name == "edit_file":
+            preview = self.build_edit_preview(function_args)
         elif function_name == "create_spreadsheet":
             preview = self.build_spreadsheet_preview(function_args)
         elif function_name == "delete_file":
@@ -347,7 +421,7 @@ class ConfirmationManager:
                         "inline": False,
                     }
                 )
-        elif function_name in {"write_file", "create_spreadsheet"}:
+        elif function_name in {"write_file", "edit_file", "create_spreadsheet"}:
             if preview.get("path"):
                 fields.append(
                     {

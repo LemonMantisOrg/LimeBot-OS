@@ -20,7 +20,10 @@ from typing import Any, Dict, Tuple
 TOOL_RESULT_LIMITS: Dict[str, int] = {
     "capability_search": 4_000,
     "read_file": 8_000,
+    "edit_file": 8_000,
     "search_files": 5_000,
+    "verify_files": 6_000,
+    "diagnose_files": 8_000,
     "memory_search": 3_000,
     "browser_extract": 5_000,
     "browser_get_page_text": 5_000,
@@ -34,6 +37,7 @@ TOOL_RESULT_LIMITS: Dict[str, int] = {
     "list_dir": 500,
     "generate_image": 2_000,
     "analyze_video": 30_000,
+    "spawn_agent": 12_000,
 }
 DEFAULT_TOOL_RESULT_LIMIT = 2_000
 
@@ -69,7 +73,7 @@ TAG_COMPAT_TOOLS = frozenset({
 TOOL_INTENT_RE = re.compile(
     r"\b("
     # Exact tool names
-    r"capability_search|read_file|write_file|delete_file|list_dir|search_files|run_command|memory_search|memory_save|"
+    r"capability_search|read_file|edit_file|write_file|delete_file|list_dir|search_files|verify_files|diagnose_files|run_command|memory_search|memory_save|"
     r"cron_add|cron_list|cron_remove|spawn_agent|generate_image|send_media|send_voice|analyze_video|"
     # Search tool names
     r"web_search|image_search|deep_research|"
@@ -100,6 +104,15 @@ TOOL_NAME_ALIASES: Dict[str, str] = {
     "cat": "read_file",
     "open_file": "read_file",
     "show_file": "read_file",
+    "edit": "edit_file",
+    "apply_patch": "edit_file",
+    "patch_file": "edit_file",
+    "verify": "verify_files",
+    "check_files": "verify_files",
+    "validate_files": "verify_files",
+    "diagnose": "diagnose_files",
+    "diagnostics": "diagnose_files",
+    "lint_files": "diagnose_files",
     "grep": "search_files",
     "rg": "search_files",
     "ripgrep": "search_files",
@@ -120,6 +133,14 @@ TOOL_NAME_ALIASES: Dict[str, str] = {
 FILESYSTEM_ALIAS_ACTIONS: Dict[str, str] = {
     "list": "list_dir",
     "read": "read_file",
+    "edit": "edit_file",
+    "patch": "edit_file",
+    "modify": "edit_file",
+    "verify": "verify_files",
+    "check": "verify_files",
+    "diagnose": "diagnose_files",
+    "diagnostics": "diagnose_files",
+    "lint": "diagnose_files",
     "write": "write_file",
     "delete": "delete_file",
     "find": "search_files",
@@ -197,7 +218,47 @@ def normalize_tool_alias(
                 **{
                     k: v
                     for k, v in normalized_args.items()
-                    if k in {"max_chars"}
+                    if k in {"max_chars", "include_hash"}
+                },
+            }
+        elif normalized_name == "edit_file":
+            normalized_args = {
+                "path": normalized_args.get("path")
+                or normalized_args.get("file")
+                or normalized_args.get("filename")
+                or "",
+                "edits": normalized_args.get("edits")
+                or normalized_args.get("patches")
+                or [],
+                "expected_sha256": normalized_args.get("expected_sha256")
+                or normalized_args.get("sha256")
+                or normalized_args.get("expected_hash")
+                or "",
+            }
+        elif normalized_name == "verify_files":
+            paths = normalized_args.get("paths")
+            if paths is None:
+                path = normalized_args.get("path") or normalized_args.get("file")
+                paths = [path] if path else []
+            normalized_args = {
+                "paths": paths,
+                **{
+                    k: v
+                    for k, v in normalized_args.items()
+                    if k in {"include_diagnostics", "provider"}
+                },
+            }
+        elif normalized_name == "diagnose_files":
+            paths = normalized_args.get("paths")
+            if paths is None:
+                path = normalized_args.get("path") or normalized_args.get("file")
+                paths = [path] if path else []
+            normalized_args = {
+                "paths": paths,
+                **{
+                    k: v
+                    for k, v in normalized_args.items()
+                    if k in {"provider", "timeout"}
                 },
             }
         elif normalized_name == "search_files":

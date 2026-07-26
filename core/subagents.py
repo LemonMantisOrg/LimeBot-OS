@@ -20,8 +20,8 @@ except ImportError:
 CLAUDE_TOOL_ALIASES: Dict[str, str] = {
     "read": "read_file",
     "write": "write_file",
-    "edit": "write_file",
-    "multiedit": "write_file",
+    "edit": "edit_file",
+    "multiedit": "edit_file",
     "delete": "delete_file",
     "ls": "list_dir",
     "glob": "search_files",
@@ -99,7 +99,7 @@ BUILTIN_SUBAGENTS: List[Dict[str, Any]] = [
             "gaps. Report concrete findings first with file paths and reasons. Keep "
             "the review concise and actionable."
         ),
-        "tools": ["read_file", "search_files", "list_dir", "run_command"],
+        "tools": ["read_file", "search_files", "list_dir", "verify_files", "diagnose_files", "run_command"],
         "model": "inherit",
         "disallowed_tools": [],
         "max_turns": 8,
@@ -118,7 +118,7 @@ BUILTIN_SUBAGENTS: List[Dict[str, Any]] = [
             "verified, and the biggest remaining risk. Do not claim success without "
             "evidence."
         ),
-        "tools": ["read_file", "search_files", "list_dir", "run_command"],
+        "tools": ["read_file", "search_files", "list_dir", "verify_files", "diagnose_files", "run_command"],
         "model": "inherit",
         "disallowed_tools": [],
         "max_turns": 8,

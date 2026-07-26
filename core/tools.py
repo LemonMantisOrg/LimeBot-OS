@@ -6,6 +6,7 @@ Provides safe, whitelisted, and confirmed interface for file/OS operations.
 import asyncio
 import ast
 import base64
+import hashlib
 import ipaddress
 import json
 import mimetypes
@@ -13,7 +14,9 @@ import os
 import re
 import shutil
 import socket
+import stat
 import subprocess
+import tempfile
 import urllib.parse
 import uuid
 from decimal import Decimal, DivisionByZero, InvalidOperation, localcontext
@@ -23,6 +26,8 @@ from loguru import logger
 from datetime import datetime
 
 from core.tool_defs import build_tool_definitions
+from core.file_edits import EditValidationError, apply_text_edits, unified_text_diff
+from core.context import workspace_context
 from core.vectors import get_vector_service
 from core.paths import LONG_TERM_MEMORY_FILE, MEMORY_DIR, PERSONA_DIR
 from core.redaction import redact_sensitive_text
@@ -361,7 +366,7 @@ class Toolbox:
         if not tokens:
             return None
 
-        root = self.allowed_paths[0] if self.allowed_paths else Path.cwd()
+        root = self._active_tool_root()
         root_main = (root / "main.py").resolve()
         for index, token in enumerate(tokens):
             if not token.lower().endswith("main.py"):
@@ -450,10 +455,61 @@ class Toolbox:
 
         return tools
 
+    def _active_workspace_paths(self) -> tuple[Optional[Path], Optional[Path]]:
+        context = workspace_context.get() or {}
+        if not isinstance(context, dict):
+            return None, None
+        raw_root = str(context.get("root") or "").strip()
+        raw_source_root = str(context.get("source_root") or "").strip()
+        if not raw_root or not raw_source_root:
+            return None, None
+        try:
+            root = Path(raw_root).resolve()
+            source_root = Path(raw_source_root).resolve()
+        except (OSError, ValueError):
+            return None, None
+        if not root.is_dir() or not source_root.is_dir():
+            return None, None
+        return root, source_root
+
+    def _resolve_tool_path(self, path_str: Union[str, Path]) -> Path:
+        """Resolve a tool path inside the active isolated workspace when present."""
+        raw = Path(path_str).expanduser()
+        workspace_root, source_root = self._active_workspace_paths()
+        if workspace_root is None or source_root is None:
+            return raw.resolve()
+
+        if raw.is_absolute():
+            resolved = raw.resolve()
+            if resolved == workspace_root or workspace_root in resolved.parents:
+                return resolved
+            try:
+                relative = resolved.relative_to(source_root)
+            except ValueError:
+                return resolved
+            return (workspace_root / relative).resolve()
+
+        # A relative argument may still spell a path under the source root
+        # (for example ``temp/project/file.py`` when the project root is the
+        # process cwd).  Resolve that spelling before falling back to the
+        # active clone-relative interpretation.
+        try:
+            resolved = raw.resolve()
+            relative = resolved.relative_to(source_root)
+        except (OSError, ValueError):
+            relative = None
+        if relative is not None:
+            return (workspace_root / relative).resolve()
+        return (workspace_root / raw).resolve()
+
+    def _active_tool_root(self) -> Path:
+        workspace_root, _ = self._active_workspace_paths()
+        return workspace_root or (self.allowed_paths[0] if self.allowed_paths else Path.cwd())
+
     def _is_path_allowed(self, path_str: Union[str, Path]) -> bool:
         """Enforce whitelist and block sensitive files."""
         try:
-            target_path = Path(path_str).resolve()
+            target_path = self._resolve_tool_path(path_str)
             name = target_path.name.lower()
 
             if (
@@ -464,6 +520,9 @@ class Toolbox:
             ):
                 return False
 
+            workspace_root, _ = self._active_workspace_paths()
+            if workspace_root is not None:
+                return target_path == workspace_root or workspace_root in target_path.parents
             for allowed in self.allowed_paths:
                 if target_path == allowed or allowed in target_path.parents:
                     return True
@@ -471,13 +530,102 @@ class Toolbox:
         except Exception:
             return False
 
-    @staticmethod
-    def _to_display_path(path: Path) -> str:
+    def _to_display_path(self, path: Path) -> str:
         """Prefer project-relative paths in tool responses."""
         try:
-            return str(path.resolve().relative_to(Path.cwd().resolve()))
+            resolved = path.resolve()
+            workspace_root, source_root = self._active_workspace_paths()
+            if workspace_root is not None and source_root is not None:
+                try:
+                    resolved = source_root / resolved.relative_to(workspace_root)
+                except ValueError:
+                    pass
+            return str(resolved.relative_to(Path.cwd().resolve()))
         except Exception:
             return str(path.resolve())
+
+    @staticmethod
+    def _sha256_file_sync(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _is_persona_managed_path(self, path: Path) -> bool:
+        try:
+            resolved = path.resolve()
+            persona_roots = [PERSONA_DIR.resolve()]
+            workspace_root, source_root = self._active_workspace_paths()
+            if workspace_root is not None and source_root is not None:
+                try:
+                    persona_roots.append(
+                        (
+                            workspace_root
+                            / PERSONA_DIR.resolve().relative_to(source_root)
+                        ).resolve()
+                    )
+                except ValueError:
+                    pass
+            return any(
+                resolved == persona_root or persona_root in resolved.parents
+                for persona_root in persona_roots
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _persona_write_error() -> str:
+        return (
+            "Error: Direct modification of state-managed files under 'persona/' is blocked. "
+            "Please use the appropriate XML tags to update your persona, mood, relationship, "
+            "memories, or user profiles (e.g., <save_soul>, <save_identity>, <save_mood>, "
+            "<save_relationship>, <save_memory>, <log_memory>, or <save_user>)."
+        )
+
+    @staticmethod
+    def _atomic_write_text_sync(path: Path, content: str) -> None:
+        """Atomically replace an existing text file in its own directory."""
+        temporary_path: Optional[Path] = None
+        try:
+            mode = stat.S_IMODE(path.stat().st_mode)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                newline="",
+                dir=str(path.parent),
+                prefix=f".{path.name}.limebot-",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary_path = Path(handle.name)
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.chmod(temporary_path, mode)
+            except OSError:
+                logger.debug("Could not preserve permissions for temporary edit file")
+            os.replace(temporary_path, path)
+            temporary_path = None
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    @classmethod
+    def _atomic_write_text_if_unchanged_sync(
+        cls, path: Path, expected_sha256: str, content: str
+    ) -> None:
+        """Recheck the target immediately before an atomic replacement."""
+        current_sha256 = cls._sha256_file_sync(path)
+        if current_sha256 != expected_sha256:
+            raise EditValidationError(
+                "The file changed while the edit was being prepared; re-read it and retry."
+            )
+        cls._atomic_write_text_sync(path, content)
 
     def _format_search_results(self, rows: List[Dict[str, Any]], query: str) -> str:
         if not rows:
@@ -524,7 +672,7 @@ class Toolbox:
             return False, f"Access denied to path '{path_str}'.", None
 
         try:
-            p = Path(path_str).resolve()
+            p = self._resolve_tool_path(path_str)
         except Exception:
             return False, f"Invalid path '{path_str}'.", None
 
@@ -608,6 +756,7 @@ class Toolbox:
         max_chars: int = 20_000,
         start_line: int = None,
         end_line: int = None,
+        include_hash: bool = False,
     ) -> str:
         """
         Read file contents with optional line-range slicing.
@@ -615,7 +764,7 @@ class Toolbox:
         """
         if not self._is_path_allowed(path):
             return f"Error: Access denied to path '{path}'."
-        p = Path(path).resolve()
+        p = self._resolve_tool_path(path)
         if not p.exists():
             return f"Error: File '{path}' does not exist."
         if not p.is_file():
@@ -626,6 +775,20 @@ class Toolbox:
             except Exception:
                 max_chars = 20_000
             max_chars = max(200, min(max_chars, 200_000))
+            include_hash = include_hash is True or (
+                isinstance(include_hash, str)
+                and include_hash.strip().lower() in {"1", "true", "yes"}
+            )
+            file_hash = (
+                await asyncio.to_thread(self._sha256_file_sync, p)
+                if include_hash
+                else None
+            )
+
+            def _with_metadata(text: str) -> str:
+                if not file_hash:
+                    return text
+                return f"[File SHA-256: {file_hash}]\n{text}"
 
             has_range = start_line is not None or end_line is not None
             if has_range:
@@ -655,7 +818,7 @@ class Toolbox:
                         end_line=end_line,
                     )
 
-                return await asyncio.to_thread(_read_rich_document)
+                return _with_metadata(await asyncio.to_thread(_read_rich_document))
 
             if has_range:
                 def _read_line_range() -> str:
@@ -685,7 +848,7 @@ class Toolbox:
                         output += f"\n... (Truncated at {max_chars} chars)"
                     return output
 
-                return await asyncio.to_thread(_read_line_range)
+                return _with_metadata(await asyncio.to_thread(_read_line_range))
 
             def _read_bounded() -> str:
                 with open(p, "r", encoding="utf-8", errors="replace") as f:
@@ -694,7 +857,7 @@ class Toolbox:
                     return chunk[:max_chars] + f"\n... (Truncated at {max_chars} chars)"
                 return chunk
 
-            return await asyncio.to_thread(_read_bounded)
+            return _with_metadata(await asyncio.to_thread(_read_bounded))
         except Exception as e:
             return f"Error reading file: {e}"
 
@@ -702,17 +865,9 @@ class Toolbox:
         """Write content to a file."""
         if not self._is_path_allowed(path):
             return f"Error: Access denied to path '{path}'."
-        p = Path(path).resolve()
-        try:
-            resolved_persona = PERSONA_DIR.resolve()
-            if p == resolved_persona or resolved_persona in p.parents:
-                return (
-                    "Error: Direct modification of state-managed files under 'persona/' is blocked. "
-                    "Please use the appropriate XML tags to update your persona, mood, relationship, memories, or user profiles "
-                    "(e.g., <save_soul>, <save_identity>, <save_mood>, <save_relationship>, <save_memory>, <log_memory>, or <save_user>)."
-                )
-        except Exception as e:
-            logger.error(f"Error checking persona path safety: {e}")
+        p = self._resolve_tool_path(path)
+        if self._is_persona_managed_path(p):
+            return self._persona_write_error()
 
         try:
             await asyncio.to_thread(p.parent.mkdir, parents=True, exist_ok=True)
@@ -720,6 +875,372 @@ class Toolbox:
             return f"Successfully wrote to '{path}'."
         except Exception as e:
             return f"Error writing file: {e}"
+
+    async def edit_file(
+        self,
+        path: str,
+        edits: Any,
+        expected_sha256: str,
+    ) -> str:
+        """Apply exact, hash-guarded text edits atomically.
+
+        This is intentionally separate from ``write_file``.  Code edits must
+        be anchored to the snapshot the model inspected and must never land
+        partially when one requested edit is invalid.
+        """
+        if not self._is_path_allowed(path):
+            return f"Error: Access denied to path '{path}'."
+
+        target = self._resolve_tool_path(path)
+        if self._is_persona_managed_path(target):
+            return self._persona_write_error()
+        if not target.exists():
+            return f"Error: File '{path}' does not exist; use write_file to create it."
+        if not target.is_file():
+            return f"Error: '{path}' is not a file."
+
+        expected = str(expected_sha256 or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected):
+            return (
+                "Error: edit_file requires expected_sha256 from "
+                "read_file(include_hash=true)."
+            )
+
+        try:
+            size = target.stat().st_size
+            if size > 5 * 1024 * 1024:
+                return "Error: edit_file only accepts text files up to 5 MiB."
+
+            original_bytes = await asyncio.to_thread(target.read_bytes)
+            current_sha256 = hashlib.sha256(original_bytes).hexdigest()
+            if current_sha256 != expected:
+                return (
+                    "Error: Stale edit rejected. The file's SHA-256 is "
+                    f"{current_sha256}, not {expected}; re-read the file and retry."
+                )
+            original = original_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            return "Error: edit_file only supports UTF-8 text files."
+        except OSError as exc:
+            return f"Error reading file for edit: {exc}"
+
+        try:
+            updated, replacement_count = apply_text_edits(original, edits)
+        except EditValidationError as exc:
+            return f"Error: Edit rejected: {exc}"
+
+        diff = unified_text_diff(
+            original,
+            updated,
+            fromfile=f"{self._to_display_path(target)} (before)",
+            tofile=f"{self._to_display_path(target)} (after)",
+        )
+        try:
+            await asyncio.to_thread(
+                self._atomic_write_text_if_unchanged_sync,
+                target,
+                expected,
+                updated,
+            )
+        except EditValidationError as exc:
+            return f"Error: Edit rejected: {exc}"
+        except OSError as exc:
+            return f"Error writing file edit: {exc}"
+
+        after_sha256 = hashlib.sha256(updated.encode("utf-8")).hexdigest()
+        diff_lines = diff.splitlines()
+        added_lines = sum(
+            1
+            for line in diff_lines
+            if line.startswith("+") and not line.startswith("+++")
+        )
+        removed_lines = sum(
+            1
+            for line in diff_lines
+            if line.startswith("-") and not line.startswith("---")
+        )
+        verification_raw = await self.verify_files([str(target)])
+        try:
+            verification: Any = json.loads(verification_raw)
+        except (TypeError, json.JSONDecodeError):
+            verification = {"status": "unavailable", "detail": verification_raw}
+        return json.dumps(
+            {
+                "status": "applied",
+                "path": self._to_display_path(target),
+                "replacements": replacement_count,
+                "added_lines": added_lines,
+                "removed_lines": removed_lines,
+                "sha256_before": expected,
+                "sha256_after": after_sha256,
+                "diff": diff,
+                "verification": verification,
+            },
+            ensure_ascii=False,
+        )
+
+    @staticmethod
+    def _verify_text_syntax(path: Path, text: str) -> Dict[str, Any]:
+        suffix = path.suffix.lower()
+        try:
+            if suffix in {".py", ".pyi"}:
+                compile(text, str(path), "exec")
+                return {"name": "python_syntax", "status": "passed"}
+            if suffix == ".json":
+                json.loads(text)
+                return {"name": "json_syntax", "status": "passed"}
+            if suffix == ".toml":
+                try:
+                    import tomllib
+                except ImportError:
+                    return {"name": "toml_syntax", "status": "skipped"}
+                tomllib.loads(text)
+                return {"name": "toml_syntax", "status": "passed"}
+        except SyntaxError as exc:
+            line = f" line {exc.lineno}" if exc.lineno else ""
+            return {
+                "name": f"{suffix.lstrip('.') or 'text'}_syntax",
+                "status": "failed",
+                "detail": f"{exc.msg}{line}",
+            }
+        except (ValueError, TypeError) as exc:
+            return {
+                "name": f"{suffix.lstrip('.') or 'text'}_syntax",
+                "status": "failed",
+                "detail": str(exc),
+            }
+        return {"name": "syntax", "status": "skipped"}
+
+    @staticmethod
+    def _verify_git_diff_check_sync(path: Path) -> Dict[str, Any]:
+        root = Path.cwd().resolve()
+        try:
+            relative = path.resolve().relative_to(root)
+        except ValueError:
+            return {
+                "name": "git_diff_check",
+                "status": "skipped",
+                "detail": "target is outside the project root",
+            }
+
+        try:
+            completed = subprocess.run(
+                ["git", "diff", "--check", "--", str(relative)],
+                cwd=str(root),
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {
+                "name": "git_diff_check",
+                "status": "skipped",
+                "detail": f"git diff check unavailable: {exc}",
+            }
+
+        if completed.returncode == 0:
+            return {"name": "git_diff_check", "status": "passed"}
+        detail = (completed.stdout or completed.stderr or "git diff --check failed").strip()
+        return {
+            "name": "git_diff_check",
+            "status": "failed",
+            "detail": redact_sensitive_text(detail[:1_200]),
+        }
+
+    async def verify_files(
+        self,
+        paths: List[str],
+        include_diagnostics: bool = False,
+        provider: str = "auto",
+    ) -> str:
+        """Run bounded, read-only checks for changed files."""
+        if not isinstance(paths, list) or not paths:
+            return "Error: verify_files requires a non-empty paths array."
+        if len(paths) > 32:
+            return "Error: verify_files accepts at most 32 paths."
+
+        file_results: List[Dict[str, Any]] = []
+        for raw_path in paths:
+            display_input = str(raw_path or "")
+            if not self._is_path_allowed(display_input):
+                file_results.append(
+                    {
+                        "path": display_input,
+                        "status": "failed",
+                        "errors": ["access denied"],
+                    }
+                )
+                continue
+            target = self._resolve_tool_path(display_input)
+            if not target.exists() or not target.is_file():
+                file_results.append(
+                    {
+                        "path": self._to_display_path(target),
+                        "status": "failed",
+                        "errors": ["file does not exist or is not a regular file"],
+                    }
+                )
+                continue
+
+            try:
+                if target.stat().st_size > 5 * 1024 * 1024:
+                    raise ValueError("file exceeds the 5 MiB verification limit")
+                raw_bytes = await asyncio.to_thread(target.read_bytes)
+                text = raw_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                file_results.append(
+                    {
+                        "path": self._to_display_path(target),
+                        "status": "failed",
+                        "errors": ["file is not valid UTF-8 text"],
+                    }
+                )
+                continue
+            except (OSError, ValueError) as exc:
+                file_results.append(
+                    {
+                        "path": self._to_display_path(target),
+                        "status": "failed",
+                        "errors": [str(exc)],
+                    }
+                )
+                continue
+
+            checks: List[Dict[str, Any]] = []
+            marker_lines = [
+                index
+                for index, line in enumerate(text.splitlines(), start=1)
+                if re.match(r"^\s*(?:<<<<<<<|=======|>>>>>>>)", line)
+            ]
+            if marker_lines:
+                checks.append(
+                    {
+                        "name": "conflict_markers",
+                        "status": "failed",
+                        "detail": f"marker(s) at line(s) {', '.join(map(str, marker_lines[:8]))}",
+                    }
+                )
+            else:
+                checks.append({"name": "conflict_markers", "status": "passed"})
+            checks.append(self._verify_text_syntax(target, text))
+            checks.append(
+                await asyncio.to_thread(self._verify_git_diff_check_sync, target)
+            )
+            failures = [check for check in checks if check.get("status") == "failed"]
+            file_results.append(
+                {
+                    "path": self._to_display_path(target),
+                    "status": "failed" if failures else "passed",
+                    "checks": checks,
+                }
+            )
+
+        overall = (
+            "failed"
+            if any(row.get("status") == "failed" for row in file_results)
+            else "passed"
+        )
+        payload: Dict[str, Any] = {"status": overall, "files": file_results}
+        diagnostics_requested = include_diagnostics is True or (
+            isinstance(include_diagnostics, str)
+            and include_diagnostics.strip().lower() in {"1", "true", "yes"}
+        )
+        if diagnostics_requested:
+            diagnostics_raw = await self.diagnose_files(paths, provider=provider)
+            try:
+                diagnostics = json.loads(diagnostics_raw)
+            except (TypeError, json.JSONDecodeError):
+                diagnostics = {
+                    "status": "failed",
+                    "detail": diagnostics_raw,
+                }
+            payload["diagnostics"] = diagnostics
+            if diagnostics.get("status") == "failed":
+                payload["status"] = "failed"
+        return json.dumps(payload, ensure_ascii=False)
+
+    async def diagnose_files(
+        self,
+        paths: List[str],
+        provider: str = "auto",
+        timeout: float = 45,
+    ) -> str:
+        """Use an installed linter/type checker when available.
+
+        This is optional by design.  Missing Ruff, Pyright, ESLint, or
+        TypeScript tooling returns ``skipped`` rather than making LimeBot's
+        core verification path unavailable.
+        """
+        if not isinstance(paths, list) or not paths:
+            return "Error: diagnose_files requires a non-empty paths array."
+        if len(paths) > 32:
+            return "Error: diagnose_files accepts at most 32 paths."
+
+        targets: List[Path] = []
+        invalid_paths: List[Dict[str, str]] = []
+        for raw_path in paths:
+            display_input = str(raw_path or "")
+            if not self._is_path_allowed(display_input):
+                invalid_paths.append(
+                    {"path": display_input, "detail": "access denied"}
+                )
+                continue
+            target = self._resolve_tool_path(display_input)
+            if not target.exists() or not target.is_file():
+                invalid_paths.append(
+                    {
+                        "path": self._to_display_path(target),
+                        "detail": "file does not exist or is not a regular file",
+                    }
+                )
+                continue
+            targets.append(target)
+
+        if not targets:
+            return json.dumps(
+                {
+                    "status": "failed",
+                    "provider": str(provider or "auto"),
+                    "results": [],
+                    "invalid_paths": invalid_paths,
+                },
+                ensure_ascii=False,
+            )
+
+        try:
+            timeout_value = max(1.0, min(float(timeout), 120.0))
+        except (TypeError, ValueError):
+            timeout_value = 45.0
+
+        try:
+            from core.diagnostics import run_optional_diagnostics
+
+            payload = await run_optional_diagnostics(
+                targets,
+                self._active_tool_root(),
+                provider=provider,
+                env=self._sanitized_env(),
+                timeout=timeout_value,
+            )
+        except Exception as exc:
+            logger.warning(f"Optional diagnostics failed to start: {exc}")
+            payload = {
+                "status": "failed",
+                "provider": str(provider or "auto"),
+                "results": [],
+                "detail": str(exc),
+            }
+
+        payload["paths"] = [self._to_display_path(target) for target in targets]
+        if invalid_paths:
+            payload["invalid_paths"] = invalid_paths
+            payload["status"] = "failed"
+        for result in payload.get("results", []):
+            for key in ("detail", "output"):
+                if key in result:
+                    result[key] = redact_sensitive_text(str(result[key])[:8_000])
+        return json.dumps(payload, ensure_ascii=False)
 
     async def calculate(self, expression: str) -> str:
         """Evaluate bounded arithmetic without invoking a shell or interpreter."""
@@ -785,15 +1306,11 @@ class Toolbox:
         """Create a styled, formula-capable XLSX workbook as a native tool."""
         if not self._is_path_allowed(path):
             return f"Error: Access denied to path '{path}'."
-        target = Path(path).resolve()
+        target = self._resolve_tool_path(path)
         if target.suffix.lower() != ".xlsx":
             return "Error: create_spreadsheet requires a path ending in .xlsx."
-        try:
-            resolved_persona = PERSONA_DIR.resolve()
-            if target == resolved_persona or resolved_persona in target.parents:
-                return "Error: Direct modification of state-managed files under 'persona/' is blocked."
-        except Exception as exc:
-            logger.error(f"Error checking spreadsheet path safety: {exc}")
+        if self._is_persona_managed_path(target):
+            return "Error: Direct modification of state-managed files under 'persona/' is blocked."
 
         if not isinstance(sheets, list) or not sheets:
             return "Error: At least one worksheet is required."
@@ -917,16 +1434,12 @@ class Toolbox:
         """Delete a file or directory."""
         if not self._is_path_allowed(path):
             return f"Error: Access denied to path '{path}'."
-        p = Path(path).resolve()
-        try:
-            resolved_persona = PERSONA_DIR.resolve()
-            if p == resolved_persona or resolved_persona in p.parents:
-                return (
-                    "Error: Direct deletion of state-managed files under 'persona/' is blocked. "
-                    "Please use the appropriate XML tags to manage your state."
-                )
-        except Exception as e:
-            logger.error(f"Error checking persona path safety: {e}")
+        p = self._resolve_tool_path(path)
+        if self._is_persona_managed_path(p):
+            return (
+                "Error: Direct deletion of state-managed files under 'persona/' is blocked. "
+                "Please use the appropriate XML tags to manage your state."
+            )
 
         if not p.exists():
             return f"Error: Path '{path}' does not exist."
@@ -955,7 +1468,7 @@ class Toolbox:
         """
         if not self._is_path_allowed(path):
             return f"Error: Access denied to path '{path}'."
-        p = Path(path).resolve()
+        p = self._resolve_tool_path(path)
         if not p.exists():
             return f"Error: Directory '{path}' does not exist."
         if not p.is_dir():
@@ -1084,7 +1597,7 @@ class Toolbox:
         if not self._is_path_allowed(path):
             return f"Error: Access denied to path '{path}'."
 
-        root = Path(path).resolve()
+        root = self._resolve_tool_path(path)
         if not root.exists():
             return f"Error: Path '{path}' does not exist."
 
@@ -1235,7 +1748,7 @@ class Toolbox:
                     )
                     if not path_text:
                         continue
-                    file_path = Path(path_text).resolve()
+                    file_path = self._resolve_tool_path(path_text)
                     if not self._is_path_allowed(file_path):
                         continue
 
@@ -1363,6 +1876,34 @@ class Toolbox:
         if long_running_hint:
             return long_running_hint
 
+        workspace_root, source_root = self._active_workspace_paths()
+        if workspace_root is not None and source_root is not None:
+            normalized_command = os.path.normcase(command).replace("/", "\\")
+            normalized_source_root = os.path.normcase(str(source_root)).replace(
+                "/", "\\"
+            ).rstrip("\\")
+            source_path_spellings = {normalized_source_root}
+            try:
+                relative_source = source_root.relative_to(Path.cwd().resolve())
+                source_path_spellings.add(
+                    os.path.normcase(str(relative_source)).replace("/", "\\")
+                )
+            except ValueError:
+                pass
+            if any(
+                spelling and spelling in normalized_command
+                for spelling in source_path_spellings
+            ):
+                return (
+                    "Error: Isolated sub-agent commands cannot address the live project "
+                    "by absolute path. Use paths relative to the temporary workspace."
+                )
+            if re.search(r"(^|[\s\"'])\.\.(?:[\\/]|$)", command):
+                return (
+                    "Error: Isolated sub-agent commands cannot escape the temporary "
+                    "workspace with parent-directory paths."
+                )
+
         if pseudo_call_match:
             call_name = pseudo_call_match.group(1)
             return (
@@ -1454,7 +1995,7 @@ class Toolbox:
                 subprocess.Popen(
                     command,
                     shell=True,
-                    cwd=str(self.allowed_paths[0]),
+                    cwd=str(self._active_tool_root()),
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -1481,7 +2022,7 @@ class Toolbox:
                 "stdin": asyncio.subprocess.DEVNULL,
                 "stdout": asyncio.subprocess.PIPE,
                 "stderr": asyncio.subprocess.PIPE,
-                "cwd": str(self.allowed_paths[0]),
+                "cwd": str(self._active_tool_root()),
                 "env": self._sanitized_env(),
             }
             if os.name == "nt":
@@ -1823,10 +2364,15 @@ class Toolbox:
         session_key: str = None,
         agent: Optional[str] = None,
         background: Optional[bool] = None,
+        isolation: str = "auto",
     ) -> str:
         """Spawn a sub-agent and optionally let it report back in the background."""
         if not self.agent:
             return "Error: Agent loop not linked to toolbox."
+
+        requested_isolation = str(isolation or "auto").strip().lower()
+        if requested_isolation not in {"auto", "copy", "none"}:
+            return "Error: isolation must be one of: auto, copy, none."
 
         if not session_key:
             from core.context import tool_context
@@ -1850,6 +2396,30 @@ class Toolbox:
         if background is None and subagent_profile:
             use_background = bool(subagent_profile.get("background"))
 
+        coding_task = bool(
+            re.search(
+                r"\b(code|coding|repo|repository|bug|fix|implement|edit|patch|review|verify|test|refactor|lint|diagnos)\w*\b",
+                str(task or ""),
+                re.IGNORECASE,
+            )
+        )
+        use_isolated_copy = requested_isolation == "copy" or (
+            requested_isolation == "auto"
+            and (coding_task or agent in {"explorer", "reviewer", "verifier"})
+        )
+        isolation_mode = "copy" if use_isolated_copy else "none"
+        isolated_workspace = None
+        if use_isolated_copy:
+            try:
+                from core.workspace_isolation import IsolatedWorkspace
+
+                isolated_workspace = await IsolatedWorkspace.create(
+                    self._active_tool_root(), label=sub_session_key
+                )
+            except Exception as exc:
+                logger.error(f"Could not create isolated sub-agent workspace: {exc}")
+                return f"Error: Could not create isolated sub-agent workspace: {exc}"
+
         try:
             if use_background:
                 task_id = await self.agent.start_background_subagent(
@@ -1857,11 +2427,19 @@ class Toolbox:
                     sub_session_key,
                     task,
                     agent_name=agent,
+                    isolated_workspace=isolated_workspace,
+                    isolation_mode=isolation_mode,
                 )
+                # Ownership moves to the background task after it has been
+                # registered.  The task wrapper cleans it up on exit.
+                isolated_workspace = None
                 mode_label = f"'{agent}'" if agent else "generic worker"
+                isolation_label = (
+                    " in an isolated copy" if isolation_mode == "copy" else ""
+                )
                 return (
                     f"Started background sub-agent {mode_label} as "
-                    f"'{sub_session_key}' (task_id: {task_id}). "
+                    f"'{sub_session_key}' (task_id: {task_id}){isolation_label}. "
                     "It will report back when finished."
                 )
 
@@ -1870,11 +2448,21 @@ class Toolbox:
                 sub_session_key,
                 task,
                 agent_name=agent,
+                isolated_workspace=isolated_workspace,
+                isolation_mode=isolation_mode,
             )
             return str(result)
         except Exception as e:
             logger.error(f"Error spawning agent: {e}")
             return f"Error spawning agent: {e}"
+        finally:
+            if isolated_workspace is not None:
+                try:
+                    await isolated_workspace.cleanup()
+                except Exception as cleanup_error:
+                    logger.warning(
+                        f"Could not clean up isolated sub-agent workspace: {cleanup_error}"
+                    )
 
     @staticmethod
     def _is_safe_public_url(url: str) -> tuple[bool, str]:
@@ -2163,7 +2751,7 @@ class Toolbox:
         else:
             try:
                 media_fingerprint = os.path.normcase(
-                    str(Path(source).expanduser().resolve())
+                    str(self._resolve_tool_path(source))
                 )
             except Exception:
                 media_fingerprint = os.path.normcase(os.path.normpath(source))
@@ -3284,7 +3872,7 @@ class Toolbox:
         if not re.match(r"^[a-z0-9_]+$", name):
             return "Error: Skill name must be snake_case (alphanumeric and underscores only)."
 
-        skill_dir = Path("skills") / name
+        skill_dir = self._active_tool_root() / "skills" / name
         if skill_dir.exists():
             return f"Error: Skill '{name}' already exists in 'skills/'."
 
@@ -3305,11 +3893,17 @@ class Toolbox:
             await asyncio.to_thread(skill_md.write_text, content, encoding="utf-8")
 
             # Reload skills in registry if agent is present
-            if self.agent and hasattr(self.agent, "skill_registry"):
+            workspace_root, _ = self._active_workspace_paths()
+            if workspace_root is None and self.agent and hasattr(self.agent, "skill_registry"):
                 await asyncio.to_thread(self.agent.skill_registry.discover_and_load)
                 if hasattr(self.agent, "_refresh_tool_definitions"):
                     self.agent._refresh_tool_definitions()
 
+            if workspace_root is not None:
+                return (
+                    f"Success: Created skill '{name}' in the isolated workspace. "
+                    "The parent can review its captured diff before merging."
+                )
             return f"Success: Created skill '{name}' in 'skills/{name}'. You can now add logic to 'skills/{name}/api.py'."
         except Exception as e:
             return f"Error creating skill: {e}"

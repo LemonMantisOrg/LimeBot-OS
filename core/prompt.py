@@ -803,13 +803,13 @@ def build_stable_system_prompt(
 
     base_prompt += (
         "\n--- TOOL USAGE RULES ---\n"
-        "You have tools available (read_file, write_file, list_dir, run_command, etc.). "
+        "You have tools available (read_file, edit_file, verify_files, diagnose_files, write_file, list_dir, run_command, etc.). "
         "Use them through the tool-calling API — NEVER by writing JSON blocks, describing commands, or narrating actions in your message text.\n"
         "XML tags are only for the supported side-effect tags like <save_soul>, <save_identity>, <save_user>, <save_mood>, <save_relationship>, <log_memory>, <save_memory>, <discord_send>, and <discord_embed>. "
         "Do NOT invent XML tags for normal tools such as <read_file>, <list_dir>, or <run_command>.\n"
         "CRITICAL: Do NOT use write_file or delete_file to create, modify, or delete user profiles, memory files (SOUL.md, IDENTITY.md, MOOD.md, RELATIONSHIPS.md, MEMORY.md), or daily journals. For an explicit memory request, use the native `memory_save` tool; legacy persona updates use the specified XML tags (e.g., <save_user>, <save_soul>, <save_identity>, <save_mood>, <save_relationship>, <save_memory>, or <log_memory>). Direct tool writes to the 'persona/' directory are blocked.\n"
         "CRITICAL: Do NOT hallucinate, narrate, or pretend to execute tool operations. "
-        "If you need to edit a file, CALL the write_file tool. Do NOT write '(Editing file X to change Y)' in your reply. "
+        "If you need to edit an existing text or code file, first CALL read_file with include_hash=true, then CALL edit_file with exact old_text/new_text anchors and expected_sha256. Use write_file only to create a new file or intentionally replace an entire file. After edit_file, CALL verify_files and then run the narrowest relevant tests or checks before claiming completion. If an installed linter or type checker would add useful evidence, CALL diagnose_files (or verify_files with include_diagnostics=true); it is optional and may return skipped. Do NOT write '(Editing file X to change Y)' in your reply. "
         "If you need to run a command, CALL run_command. Do NOT describe running it.\n"
         "For arithmetic, prices, totals, percentages, or conversions, CALL calculate instead of doing mental math or running a script. "
         "For an Excel/XLSX request, CALL create_spreadsheet directly, verify its success result, then CALL send_media with the same path. Do not write and run an ad-hoc workbook script.\n"

@@ -62,8 +62,60 @@ BASE_TOOLS = [
                 "type": "integer",
                 "description": "Optional 1-based ending line number (inclusive).",
             },
+            "include_hash": {
+                "type": "boolean",
+                "description": "Include the current raw-file SHA-256 so a later edit_file call can reject stale edits.",
+            },
         },
         "required": ["path"],
+    },
+    {
+        "name": "edit_file",
+        "description": (
+            "Apply one or more exact, reviewable text edits to an existing UTF-8 source file. "
+            "Use read_file(..., include_hash=true) first, then pass that SHA-256 as "
+            "expected_sha256. Each edit must contain old_text and new_text; old_text must "
+            "match exactly. The operation is preflighted and atomic: stale hashes, missing "
+            "anchors, overlapping edits, and no-op edits are rejected without changing the file. "
+            "Use write_file for intentional full replacement or creating a new file."
+        ),
+        "params": {
+            "path": {
+                "type": "string",
+                "description": "Relative or absolute path to an existing UTF-8 text file.",
+            },
+            "edits": {
+                "type": "array",
+                "description": "Exact non-overlapping edits, applied against one file snapshot.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "old_text": {
+                            "type": "string",
+                            "description": "Exact text to replace, including whitespace when relevant.",
+                        },
+                        "new_text": {
+                            "type": "string",
+                            "description": "Replacement text.",
+                        },
+                        "occurrence": {
+                            "type": "integer",
+                            "description": "1-based match occurrence when old_text appears more than once; defaults to 1.",
+                        },
+                        "replace_all": {
+                            "type": "boolean",
+                            "description": "Replace every exact match instead of one occurrence; defaults to false.",
+                        },
+                    },
+                    "required": ["old_text", "new_text"],
+                },
+            },
+            "expected_sha256": {
+                "type": "string",
+                "description": "SHA-256 from read_file(include_hash=true). Required for stale-edit protection when editing an existing file.",
+            },
+        },
+        "required": ["path", "edits", "expected_sha256"],
     },
     {
         "name": "write_file",
@@ -215,6 +267,58 @@ BASE_TOOLS = [
         "required": ["query"],
     },
     {
+        "name": "verify_files",
+        "description": (
+            "Run safe, read-only checks on one or more changed files. This checks UTF-8 "
+            "decoding, conflict markers, Python/JSON/TOML syntax when applicable, and "
+            "git diff whitespace errors. Use it after editing and before claiming a coding "
+            "task is complete; it does not run arbitrary commands or tests."
+        ),
+        "params": {
+            "paths": {
+                "type": "array",
+                "description": "One or more existing files to verify.",
+                "items": {"type": "string"},
+            },
+            "include_diagnostics": {
+                "type": "boolean",
+                "description": "Also run an installed optional linter/type checker when true.",
+            },
+            "provider": {
+                "type": "string",
+                "enum": ["auto", "ruff", "pyright", "eslint", "tsc", "none"],
+                "description": "Optional diagnostics provider used when include_diagnostics is true.",
+            },
+        },
+        "required": ["paths"],
+    },
+    {
+        "name": "diagnose_files",
+        "description": (
+            "Run optional project diagnostics for changed source files using an installed "
+            "Ruff, Pyright, ESLint, or TypeScript compiler. This uses direct subprocess "
+            "arguments, never requires an LSP server, and returns skipped when no matching "
+            "provider is installed. Use provider='auto' unless the user names a tool."
+        ),
+        "params": {
+            "paths": {
+                "type": "array",
+                "description": "One or more existing source files to diagnose.",
+                "items": {"type": "string"},
+            },
+            "provider": {
+                "type": "string",
+                "enum": ["auto", "ruff", "pyright", "eslint", "tsc", "none"],
+                "description": "Optional diagnostics provider; defaults to auto.",
+            },
+            "timeout": {
+                "type": "number",
+                "description": "Maximum provider runtime in seconds (default 45, max 120).",
+            },
+        },
+        "required": ["paths"],
+    },
+    {
         "name": "run_command",
         "description": (
             "Execute one shell command only when native tools are insufficient or the user explicitly "
@@ -274,7 +378,17 @@ BASE_TOOLS = [
             "background": {
                 "type": "boolean",
                 "description": "If true, start the sub-agent in the background and let it report back later instead of waiting for its result now.",
-            }
+            },
+            "isolation": {
+                "type": "string",
+                "enum": ["auto", "copy", "none"],
+                "description": (
+                    "Workspace mode for the sub-agent. 'auto' uses a temporary copy for coding, "
+                    "repository, review, and verification work; 'copy' always isolates file edits; "
+                    "'none' keeps the existing workspace and should be reserved for read-only or "
+                    "explicitly shared tasks."
+                ),
+            },
         },
         "required": ["task"],
     },
@@ -794,12 +908,15 @@ SEARCH_TOOLS = [
 _TOOL_FAMILIES = {
     "capability_search": "capability",
     "read_file": "filesystem",
+    "edit_file": "filesystem",
     "write_file": "filesystem",
     "create_spreadsheet": "spreadsheet",
     "calculate": "calculation",
     "delete_file": "filesystem",
     "list_dir": "filesystem",
     "search_files": "filesystem",
+    "verify_files": "filesystem",
+    "diagnose_files": "filesystem",
     "create_skill": "filesystem",
     "run_command": "command",
     "memory_search": "memory",
@@ -1077,6 +1194,9 @@ _TOOL_HINTS = {
         "disponible", "integracion", "integración", "conexion", "conexión",
     },
     "read_file": {"read", "open", "show", "file", "contents", "content"},
+    "edit_file": {
+        "edit", "patch", "modify", "change", "replace", "fix", "refactor", "file", "code",
+    },
     "write_file": {"write", "edit", "save", "create", "overwrite", "file"},
     "create_spreadsheet": {
         "excel", "xlsx", "spreadsheet", "workbook", "worksheet", "table", "hoja", "libro",
@@ -1088,6 +1208,8 @@ _TOOL_HINTS = {
     "delete_file": {"delete", "remove", "erase", "cleanup"},
     "list_dir": {"list", "dir", "directory", "folder", "files", "browse"},
     "search_files": {"search", "find", "grep", "rg", "ripgrep", "match", "locate"},
+    "verify_files": {"verify", "validate", "check", "syntax", "test", "lint", "whitespace", "conflict"},
+    "diagnose_files": {"diagnose", "diagnostics", "lint", "linter", "typecheck", "type-check", "pyright", "ruff", "eslint", "tsc", "language-server", "lsp"},
     "run_command": {"run", "command", "terminal", "shell", "script", "git", "pytest", "npm", "python"},
     "memory_search": {"memory", "remember", "recall", "history", "journal"},
     "memory_save": {"memory", "remember", "save", "journal", "fact", "preference"},
@@ -1222,6 +1344,12 @@ def shortlist_tool_definitions(
         mandatory.add("capability_search")
     for family in selected_families:
         mandatory.update(_MANDATORY_FAMILY_TOOLS.get(family, set()))
+    if "filesystem" in selected_families and tokens & {
+        "edit", "patch", "modify", "change", "fix", "refactor", "implement",
+        "editar", "parche", "modificar", "cambiar", "corregir", "refactorizar",
+        "implementar",
+    }:
+        mandatory.add("edit_file")
     if "browser" in selected_families and tokens & artifact_tokens:
         mandatory.add("browser_download")
 

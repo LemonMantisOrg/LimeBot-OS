@@ -95,6 +95,7 @@ from core.vectors import get_vector_service
 
 
 TOOL_BROADCAST_MAX_CHARS = 500
+_SUBAGENT_REPORT_DIFF_MAX_CHARS = 10_000
 _TOOL_LOCAL_IMAGE_MAX_BYTES = 4 * 1024 * 1024
 _RECENT_IMAGE_REFERENCE_TTL_S = 30 * 60
 _TOOL_MEDIA_PAYLOAD_START = "<limebot-tool-payload>"
@@ -122,12 +123,14 @@ CODING_PHASES = frozenset(
 )
 _READ_ONLY_TOOL_NAMES = frozenset(
     {
-        "capability_search", "read_file", "list_dir", "search_files", "memory_search", "web_search",
+        "capability_search", "read_file", "list_dir", "search_files", "verify_files", "diagnose_files", "memory_search", "web_search",
         "image_search", "deep_research", "browser_extract", "browser_get_page_text",
         "browser_snapshot", "browser_list_media", "google_search",
     }
 )
-_MUTATION_TOOL_NAMES = frozenset({"write_file", "create_spreadsheet", "delete_file"})
+_MUTATION_TOOL_NAMES = frozenset(
+    {"edit_file", "write_file", "create_spreadsheet", "delete_file"}
+)
 _RESEARCH_TOOL_NAMES = frozenset(
     {
         "web_search",
@@ -176,6 +179,8 @@ class ToolOutcome:
     failure_fingerprint: str
     diagnostic_head: str
     diagnostic_tail: str
+    verification_status: Optional[str] = None
+    verification_detail: str = ""
 
 _CASUAL_WORDS = frozenset(
     {
@@ -374,12 +379,15 @@ class AgentLoop:
 
         self._tool_registry: Dict[str, Any] = {
             "read_file": self.toolbox.read_file,
+            "edit_file": self.toolbox.edit_file,
             "write_file": self.toolbox.write_file,
             "create_spreadsheet": self.toolbox.create_spreadsheet,
             "calculate": self.toolbox.calculate,
             "delete_file": self.toolbox.delete_file,
             "list_dir": self.toolbox.list_dir,
             "search_files": self.toolbox.search_files,
+            "verify_files": self.toolbox.verify_files,
+            "diagnose_files": self.toolbox.diagnose_files,
             "run_command": self.toolbox.run_command,
             "memory_search": self.toolbox.memory_search,
             "memory_save": self.toolbox.memory_save,
@@ -2902,6 +2910,8 @@ class AgentLoop:
         sub_session_key: str,
         task: str,
         agent_name: Optional[str] = None,
+        isolated_workspace: Any = None,
+        isolation_mode: str = "none",
     ) -> str:
         """Create and retain a durable, cancellable background subagent job."""
         from core.task_tracker import TaskStatus, TaskType, get_task_tracker
@@ -2919,6 +2929,7 @@ class AgentLoop:
                 "parent_session_key": parent_session_key,
                 "sub_session_key": sub_session_key,
                 "agent_name": agent_name or "",
+                "isolation": isolation_mode,
             },
         )
         await tracker.update_task(task_id, status=TaskStatus.RUNNING.value)
@@ -2931,6 +2942,8 @@ class AgentLoop:
                 task,
                 agent_name,
                 start_gate,
+                isolated_workspace,
+                isolation_mode,
             ),
             name=f"limebot-subagent-{task_id}",
         )
@@ -2944,6 +2957,7 @@ class AgentLoop:
                     "background": True,
                     "parent_session_key": parent_session_key,
                     "agent_name": agent_name or "",
+                    "isolation": isolation_mode,
                 },
                 on_terminal=self._persist_managed_task_terminal,
             )
@@ -2975,6 +2989,8 @@ class AgentLoop:
         task: str,
         agent_name: Optional[str],
         start_gate: Optional[asyncio.Event] = None,
+        isolated_workspace: Any = None,
+        isolation_mode: str = "none",
     ) -> str:
         from core.task_tracker import TaskStatus, get_task_tracker
 
@@ -2992,6 +3008,8 @@ class AgentLoop:
                     sub_session_key,
                     task,
                     agent_name=agent_name,
+                    isolated_workspace=isolated_workspace,
+                    isolation_mode=isolation_mode,
                 )
                 or ""
             )
@@ -3049,6 +3067,15 @@ class AgentLoop:
                 self.background_subagent_tasks.pop(task_id, None)
             self.background_subagent_sessions.pop(task_id, None)
             self.background_subagent_parents.pop(task_id, None)
+            if isolated_workspace is not None:
+                try:
+                    await isolated_workspace.cleanup()
+                except Exception as exc:
+                    logger.warning(
+                        "Could not clean up isolated workspace for background task %s: %s",
+                        task_id,
+                        exc,
+                    )
             _CURRENT_TASK_ID.reset(task_context_token)
 
     async def get_background_subagent_task(self, task_id: str):
@@ -3294,8 +3321,13 @@ class AgentLoop:
         sub_session_key: str,
         task: str,
         agent_name: Optional[str] = None,
+        isolated_workspace: Any = None,
+        isolation_mode: str = "none",
     ) -> str:
+        workspace_token = None
         try:
+            if isolated_workspace is not None:
+                workspace_token = isolated_workspace.activate()
             logger.info(f"[SUB-AGENT] {sub_session_key} ← {parent_session_key}: {task}")
 
             subagent_profile = self.subagent_registry.get_subagent(agent_name)
@@ -3380,6 +3412,15 @@ class AgentLoop:
             if profile_block:
                 profile_block += "\n"
 
+            workspace_instructions = ""
+            if isolated_workspace is not None:
+                workspace_instructions = (
+                    "Workspace isolation: You are working in a temporary copy of the project. "
+                    "Use relative paths from the workspace root; do not use parent-directory paths "
+                    "or absolute paths into the live project. Changes are not merged automatically. "
+                    "At the end, report changed files and verification results.\n"
+                )
+
             sub_system = (
                 f"{soul}\n\n{identity}\n\n"
                 "--- SUB-AGENT INSTRUCTIONS ---\n"
@@ -3389,6 +3430,7 @@ class AgentLoop:
                     else "You are a generic sub-agent.\n"
                 )
                 + profile_block
+                + workspace_instructions
                 + f"Primary task: {task}\n"
                 + "Work independently, use tools when needed, and return a concise final result.\n" +
                 "DO NOT start a conversation — JUST COMPLETE THE TASK.\n"
@@ -3532,15 +3574,58 @@ class AgentLoop:
                 f"Result:\n{final_result or '(Silently completed)'}\n"
             )
 
+            workspace_capture = None
+            workspace_report = None
+            if isolated_workspace is not None:
+                try:
+                    workspace_capture = await isolated_workspace.capture()
+                    workspace_report = isolated_workspace.report_metadata(
+                        workspace_capture
+                    )
+                    diff_entries = []
+                    diff_budget = _SUBAGENT_REPORT_DIFF_MAX_CHARS
+                    for changed_file in workspace_capture.get("changed_files", []):
+                        diff = str(changed_file.get("diff") or "")
+                        if not diff or diff_budget <= 0:
+                            continue
+                        clipped_diff = diff[:diff_budget]
+                        diff_entries.append(
+                            {
+                                "path": changed_file.get("path", ""),
+                                "status": changed_file.get("status", "modified"),
+                                "diff": clipped_diff,
+                            }
+                        )
+                        diff_budget -= len(clipped_diff)
+                    if diff_entries:
+                        workspace_report["diff"] = diff_entries
+                    report += (
+                        "Workspace changes (not merged):\n"
+                        + json.dumps(workspace_report, ensure_ascii=False)
+                        + "\n"
+                    )
+                except Exception as workspace_error:
+                    logger.warning(
+                        f"[SUB-AGENT:{sub_session_key}] failed to capture workspace changes: "
+                        f"{workspace_error}"
+                    )
+
             parts = parent_session_key.split(":", 1)
             if len(parts) == 2:
+                report_metadata = {
+                    "is_report": True,
+                    "subagent_id": sub_session_key,
+                    "isolation": isolation_mode,
+                }
+                if workspace_capture is not None:
+                    report_metadata["workspace"] = workspace_capture
                 await self.bus.publish_inbound(
                     InboundMessage(
                         channel=parts[0],
                         sender_id="system",
                         chat_id=parts[1],
                         content=report,
-                        metadata={"is_report": True, "subagent_id": sub_session_key},
+                        metadata=report_metadata,
                     )
                 )
             return report
@@ -3548,6 +3633,21 @@ class AgentLoop:
         except Exception as e:
             logger.error(f"Error in sub-agent '{sub_session_key}': {e}")
             return f"Error in sub-agent '{sub_session_key}': {e}"
+        finally:
+            if workspace_token is not None:
+                try:
+                    isolated_workspace.deactivate(workspace_token)
+                except Exception as exc:
+                    logger.warning(
+                        f"Could not restore workspace context for sub-agent '{sub_session_key}': {exc}"
+                    )
+            if isolated_workspace is not None:
+                try:
+                    await isolated_workspace.cleanup()
+                except Exception as exc:
+                    logger.warning(
+                        f"Could not clean up isolated workspace for sub-agent '{sub_session_key}': {exc}"
+                    )
 
     @staticmethod
     def _should_include_tools(content: str) -> bool:
@@ -4819,6 +4919,8 @@ class AgentLoop:
                 "read_file",
                 "list_dir",
                 "search_files",
+                "verify_files",
+                "diagnose_files",
                 "memory_search",
                 "web_search",
                 "image_search",
@@ -4829,6 +4931,7 @@ class AgentLoop:
             if (
                 function_name
                 in {
+                    "edit_file",
                     "write_file",
                     "delete_file",
                     "create_skill",
@@ -4880,6 +4983,22 @@ class AgentLoop:
             if exit_code not in (None, 0):
                 return True
 
+        if function_name in {"edit_file", "verify_files", "diagnose_files"}:
+            try:
+                payload = json.loads(text)
+            except (TypeError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, dict):
+                if payload.get("status") == "failed":
+                    return True
+                verification = payload.get("verification")
+                if (
+                    function_name == "edit_file"
+                    and isinstance(verification, dict)
+                    and verification.get("status") == "failed"
+                ):
+                    return True
+
         return False
 
     @staticmethod
@@ -4895,6 +5014,8 @@ class AgentLoop:
 
     @staticmethod
     def _tool_phase(function_name: str, function_args: Dict[str, Any]) -> str:
+        if function_name in {"verify_files", "diagnose_files"}:
+            return "verify"
         if function_name in _MUTATION_TOOL_NAMES:
             return "apply"
         if function_name == "run_command":
@@ -4916,6 +5037,25 @@ class AgentLoop:
             fingerprint = hashlib.sha256(
                 f"{function_name}:{normalized}".encode("utf-8", "replace")
             ).hexdigest()[:16]
+        verification_status: Optional[str] = None
+        verification_detail = ""
+        if function_name in {"edit_file", "verify_files", "diagnose_files"}:
+            try:
+                payload = json.loads(text)
+            except (TypeError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, dict):
+                verification = payload.get("verification")
+                if function_name == "verify_files":
+                    verification = payload
+                if isinstance(verification, dict):
+                    status = str(verification.get("status") or "").strip().lower()
+                    if status:
+                        verification_status = status
+                    verification_detail = truncate_tool_result(
+                        redact_sensitive_text(json.dumps(verification, ensure_ascii=False)),
+                        600,
+                    )
         diagnostic_limit = 800
         diagnostic = truncate_tool_result(redact_sensitive_text(text), diagnostic_limit)
         split = diagnostic.split("\n... [truncated diagnostic] ...\n", 1)
@@ -4929,6 +5069,8 @@ class AgentLoop:
             failure_fingerprint=fingerprint,
             diagnostic_head=split[0][:400],
             diagnostic_tail=(split[1] if len(split) == 2 else split[0])[-400:],
+            verification_status=verification_status,
+            verification_detail=verification_detail,
         )
 
     async def _emit_coding_phase(
@@ -4957,6 +5099,8 @@ class AgentLoop:
                 "failure_fingerprint": outcome.failure_fingerprint,
                 "diagnostic_head": outcome.diagnostic_head,
                 "diagnostic_tail": outcome.diagnostic_tail,
+                "verification_status": outcome.verification_status,
+                "verification_detail": outcome.verification_detail,
             }
             payload["outcome"] = details
             event["outcome"] = details
@@ -5331,10 +5475,21 @@ class AgentLoop:
                     "diagnostic": outcome.diagnostic_tail,
                 }
             )
+        elif outcome.verification_status:
+            verification.append(
+                {
+                    "id": f"verification-{len(verification) + 1}",
+                    "label": "Native file checks",
+                    "status": "passed" if outcome.verification_status == "passed" else "failed",
+                    "diagnostic": outcome.verification_detail,
+                }
+            )
         if blocked:
             changeset["status"] = "blocked"
         elif outcome.tool == "run_command":
             changeset["status"] = "verified" if outcome.success else "failed"
+        elif outcome.verification_status == "failed":
+            changeset["status"] = "failed"
         elif outcome.success:
             changeset["status"] = "applied"
         changeset["verification"] = verification
@@ -6030,6 +6185,9 @@ class AgentLoop:
 
         default_arg_names = {
             "read_file": "path",
+            "edit_file": "edits",
+            "verify_files": "paths",
+            "diagnose_files": "paths",
             "write_file": "content",
             "create_spreadsheet": "path",
             "calculate": "expression",
@@ -6083,6 +6241,9 @@ class AgentLoop:
             canonical_name = TOOL_NAME_ALIASES.get(call.func.id, call.func.id)
             arg_names = {
                 "read_file": ["path"],
+                "edit_file": ["path", "edits", "expected_sha256"],
+                "verify_files": ["paths", "include_diagnostics", "provider"],
+                "diagnose_files": ["paths", "provider", "timeout"],
                 "write_file": ["path", "content"],
                 "create_spreadsheet": ["path", "sheets", "title"],
                 "calculate": ["expression"],
@@ -6325,7 +6486,7 @@ class AgentLoop:
                     return extracted
 
             bare_call_pattern = re.compile(
-                r"\b(?:list_dir|read_file|write_file|delete_file|search_files|"
+                r"\b(?:list_dir|read_file|edit_file|write_file|delete_file|search_files|verify_files|diagnose_files|"
                 r"run_command|memory_search|memory_save|google_search|browser_navigate|"
                 r"spawn_agent|send_media|send_voice|generate_image|send_discord_message|send_discord_embed|list_discord_channels|cron_remove|save_memory|log_memory|ls|dir|cat|"
                 r"grep|rg|ripgrep|find_files|shell|terminal|exec|bash|"
@@ -6387,7 +6548,7 @@ class AgentLoop:
         cleaned = content
         marker_positions = []
         legacy_tag_pattern = (
-            r"<(?:read_file|write_file|delete_file|list_dir|search_files|run_command|"
+            r"<(?:read_file|edit_file|write_file|delete_file|list_dir|search_files|verify_files|diagnose_files|run_command|"
             r"memory_search|memory_save|google_search|browser_navigate|spawn_agent|send_media|send_voice|generate_image|send_discord_message|send_discord_embed|list_discord_channels|"
             r"save_memory|log_memory|ls|dir|list_files|cat|open_file|show_file|"
             r"grep|rg|ripgrep|find_files|shell|terminal|exec|bash|powershell|cmd)>"
@@ -6460,7 +6621,7 @@ class AgentLoop:
             cleaned,
         )
         cleaned = re.sub(
-            legacy_tag_pattern + r".*?</(?:read_file|write_file|delete_file|list_dir|search_files|run_command|memory_search|memory_save|google_search|browser_navigate|spawn_agent|send_media|send_voice|generate_image|send_discord_message|send_discord_embed|list_discord_channels|save_memory|log_memory|ls|dir|list_files|cat|open_file|show_file|grep|rg|ripgrep|find_files|shell|terminal|exec|bash|powershell|cmd)>",
+            legacy_tag_pattern + r".*?</(?:read_file|edit_file|write_file|delete_file|list_dir|search_files|verify_files|diagnose_files|run_command|memory_search|memory_save|google_search|browser_navigate|spawn_agent|send_media|send_voice|generate_image|send_discord_message|send_discord_embed|list_discord_channels|save_memory|log_memory|ls|dir|list_files|cat|open_file|show_file|grep|rg|ripgrep|find_files|shell|terminal|exec|bash|powershell|cmd)>",
             "",
             cleaned,
             flags=re.DOTALL | re.IGNORECASE,
@@ -6899,7 +7060,7 @@ class AgentLoop:
                     clean_content,
                 ).strip()
                 clean_content = re.sub(
-                    r"<(?:read_file|write_file|delete_file|list_dir|search_files|run_command|memory_search|memory_save|google_search|browser_navigate|spawn_agent|send_media|send_voice|generate_image|send_discord_message|send_discord_embed|list_discord_channels|save_memory|log_memory|ls|dir|list_files|cat|open_file|show_file|grep|rg|ripgrep|find_files|shell|terminal|exec|bash|powershell|cmd)>.*?</(?:read_file|write_file|delete_file|list_dir|search_files|run_command|memory_search|memory_save|google_search|browser_navigate|spawn_agent|send_media|send_voice|generate_image|send_discord_message|send_discord_embed|list_discord_channels|save_memory|log_memory|ls|dir|list_files|cat|open_file|show_file|grep|rg|ripgrep|find_files|shell|terminal|exec|bash|powershell|cmd)>",
+                    r"<(?:read_file|edit_file|write_file|delete_file|list_dir|search_files|verify_files|diagnose_files|run_command|memory_search|memory_save|google_search|browser_navigate|spawn_agent|send_media|send_voice|generate_image|send_discord_message|send_discord_embed|list_discord_channels|save_memory|log_memory|ls|dir|list_files|cat|open_file|show_file|grep|rg|ripgrep|find_files|shell|terminal|exec|bash|powershell|cmd)>.*?</(?:read_file|edit_file|write_file|delete_file|list_dir|search_files|verify_files|diagnose_files|run_command|memory_search|memory_save|google_search|browser_navigate|spawn_agent|send_media|send_voice|generate_image|send_discord_message|send_discord_embed|list_discord_channels|save_memory|log_memory|ls|dir|list_files|cat|open_file|show_file|grep|rg|ripgrep|find_files|shell|terminal|exec|bash|powershell|cmd)>",
                     "",
                     clean_content,
                     flags=re.DOTALL | re.IGNORECASE,
