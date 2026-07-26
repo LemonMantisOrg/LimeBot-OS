@@ -3,9 +3,10 @@ import { api, API_BASE_URL } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
+import { BotVisual } from "@/components/pet/BotVisual";
+import type { PetManifest, PetState } from "@/lib/pet";
 import { cn } from "@/lib/utils";
-import { Send, Bot, Brain, Power, Paperclip, X, User, Plus, ArrowDown, ShieldAlert, Wifi, WifiOff, Play, Pause, Volume2, VolumeX, Download, Square, Pencil } from "lucide-react";
+import { Send, Brain, Power, Paperclip, X, Plus, ArrowDown, ShieldAlert, Wifi, WifiOff, Play, Pause, Volume2, VolumeX, Download, Square, Pencil } from "lucide-react";
 import {
     AlertDialog,
     AlertDialogCancel,
@@ -68,6 +69,10 @@ interface ChatInterfaceProps {
     isConnected: boolean;
     isTyping?: boolean;
     botIdentity?: { name: string; avatar: string | null };
+    petState?: PetState;
+    petEnabled?: boolean;
+    preferAnimatedPet?: boolean;
+    petManifest?: PetManifest;
     onInputChange: (value: string) => void;
     onSendMessage: (
         content?: string | null,
@@ -320,13 +325,29 @@ const UnreadSeparator = ({ count }: { count: number }) => (
     </div>
 );
 
-function TypingIndicator({ botIdentity }: { botIdentity?: { name: string; avatar: string | null } }) {
+function TypingIndicator({
+    botIdentity,
+    petState,
+    petEnabled,
+    preferAnimatedPet,
+    petManifest,
+}: {
+    botIdentity?: { name: string; avatar: string | null };
+    petState?: PetState;
+    petEnabled?: boolean;
+    preferAnimatedPet?: boolean;
+    petManifest?: PetManifest;
+}) {
     return (
         <div className="flex w-full max-w-[48rem] gap-3 animate-in fade-in slide-in-from-bottom-2 duration-200">
-            <Avatar className="mt-0.5 h-8 w-8 shrink-0 border border-border/70 shadow-sm">
-                <AvatarImage src={botIdentity?.avatar || undefined} className="object-cover" />
-                <AvatarFallback className="bg-primary/10 text-primary text-xs font-semibold">Bot</AvatarFallback>
-            </Avatar>
+            <BotVisual
+                avatar={botIdentity?.avatar}
+                petState={petState}
+                petEnabled={petEnabled}
+                preferAnimatedPet={preferAnimatedPet}
+                manifest={petManifest}
+                size="chat"
+            />
             <div className="flex items-center">
                 <div className="flex items-center gap-1 rounded-2xl bg-muted/50 px-4 py-3 text-muted-foreground">
                     <span
@@ -459,6 +480,10 @@ export function VoiceAudioPlayer({ url }: { url: string }) {
 const MemoizedMessageItem = memo(({
     msg,
     botIdentity,
+    petState,
+    petEnabled,
+    preferAnimatedPet,
+    petManifest,
     handleToolConfirmSideChannel,
     onSendMessage,
     onStartEdit,
@@ -468,6 +493,10 @@ const MemoizedMessageItem = memo(({
 }: {
     msg: Message;
     botIdentity: ChatInterfaceProps['botIdentity'];
+    petState?: PetState;
+    petEnabled?: boolean;
+    preferAnimatedPet?: boolean;
+    petManifest?: PetManifest;
     handleToolConfirmSideChannel: (confId: string, approved: boolean, sessionWhitelist: boolean) => Promise<void>;
     onSendMessage: ChatInterfaceProps['onSendMessage'];
     onStartEdit: (message: Message) => void;
@@ -494,21 +523,14 @@ const MemoizedMessageItem = memo(({
             isUser ? "justify-end" : "max-w-[48rem]"
         )}>
             {isBot && showAvatar ? (
-                <Avatar className="mt-0.5 h-8 w-8 shrink-0 border border-border/70 shadow-sm">
-                    {isBot ? (
-                        <>
-                            <AvatarImage src={botIdentity?.avatar || undefined} className="object-cover" />
-                            <AvatarFallback className="bg-primary/10 text-primary text-xs font-semibold">Bot</AvatarFallback>
-                        </>
-                    ) : (
-                        <>
-                            <AvatarImage src={undefined} />
-                            <AvatarFallback className="bg-secondary text-secondary-foreground">
-                                <User className="h-5 w-5" />
-                            </AvatarFallback>
-                        </>
-                    )}
-                </Avatar>
+                <BotVisual
+                    avatar={botIdentity?.avatar}
+                    petState={petState}
+                    petEnabled={petEnabled}
+                    preferAnimatedPet={preferAnimatedPet}
+                    manifest={petManifest}
+                    size="chat"
+                />
             ) : isBot ? (
                 <div className="h-8 w-8 shrink-0" />
             ) : (
@@ -628,6 +650,10 @@ export function ChatInterface({
     isConnected,
     isTyping,
     botIdentity,
+    petState,
+    petEnabled,
+    preferAnimatedPet,
+    petManifest,
     onInputChange,
     onSendMessage,
     onEditMessage,
@@ -1203,12 +1229,14 @@ export function ChatInterface({
                     <div className="mx-auto flex max-w-[48rem] flex-col gap-[var(--message-gap)] pb-8 font-sans">
                         {messages.length === 0 && (
                             <div className="flex flex-col items-center justify-center py-12 text-center">
-                                <Avatar className="h-14 w-14 shadow-lg shadow-primary/20">
-                                    <AvatarImage src={botIdentity?.avatar || undefined} className="object-cover" />
-                                    <AvatarFallback className="bg-primary/10 text-primary">
-                                        <Bot className="h-7 w-7" />
-                                    </AvatarFallback>
-                                </Avatar>
+                                <BotVisual
+                                    avatar={botIdentity?.avatar}
+                                    petState={petState}
+                                    petEnabled={petEnabled}
+                                    preferAnimatedPet={preferAnimatedPet}
+                                    manifest={petManifest}
+                                    size="hero"
+                                />
                                 <div className="mt-4 space-y-1">
                                     <div className="text-[10px] font-bold uppercase tracking-[0.24em] text-primary/70">
                                         Session {sessionLabel}
@@ -1304,12 +1332,20 @@ export function ChatInterface({
                                                 <ToolTimeline
                                                     executions={item.executions}
                                                     botIdentity={botIdentity}
+                                                    petState={petState}
+                                                    petEnabled={petEnabled}
+                                                    preferAnimatedPet={preferAnimatedPet}
+                                                    petManifest={petManifest}
                                                     onConfirmSideChannel={handleToolConfirmSideChannel}
                                                 />
                                             ) : (
                                                 <MemoizedMessageItem
                                                     msg={item.msg}
                                                     botIdentity={botIdentity}
+                                                    petState={petState}
+                                                    petEnabled={petEnabled}
+                                                    preferAnimatedPet={preferAnimatedPet}
+                                                    petManifest={petManifest}
                                                     handleToolConfirmSideChannel={handleToolConfirmSideChannel}
                                                     onSendMessage={onSendMessage}
                                                     onStartEdit={startEditingMessage}
@@ -1335,7 +1371,13 @@ export function ChatInterface({
                         const last = messages[messages.length - 1];
                         const botAlreadyStreaming = last?.sender === 'bot' && last?.isStreaming;
                         return !botAlreadyStreaming ? (
-                            <TypingIndicator botIdentity={botIdentity} />
+                            <TypingIndicator
+                                botIdentity={botIdentity}
+                                petState={petState}
+                                petEnabled={petEnabled}
+                                preferAnimatedPet={preferAnimatedPet}
+                                petManifest={petManifest}
+                            />
                         ) : null;
                     })()}
 

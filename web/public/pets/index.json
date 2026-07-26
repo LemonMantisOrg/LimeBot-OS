@@ -1,0 +1,9 @@
+{
+  "defaultPetId": "crimson",
+  "pets": [
+    {
+      "id": "crimson",
+      "manifestPath": "/pets/crimson/manifest.json"
+    }
+  ]
+}

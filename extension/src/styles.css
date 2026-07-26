@@ -308,6 +308,14 @@ button:disabled {
   z-index: 1;
 }
 
+.mascot-pet {
+  position: relative;
+  display: inline-block;
+  flex: 0 0 auto;
+  border-radius: 14px;
+  z-index: 1;
+}
+
 .mascot-label {
   position: relative;
   z-index: 1;

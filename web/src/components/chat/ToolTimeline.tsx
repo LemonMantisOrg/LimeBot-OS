@@ -2,15 +2,20 @@ import { useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronUp, CheckCircle2, XCircle, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ToolExecution } from "./ToolCard";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { BotVisual } from "@/components/pet/BotVisual";
+import type { PetManifest, PetState } from "@/lib/pet";
 
 interface ToolTimelineProps {
     executions: ToolExecution[];
     botIdentity?: { name: string; avatar: string | null };
+    petState?: PetState;
+    petEnabled?: boolean;
+    preferAnimatedPet?: boolean;
+    petManifest?: PetManifest;
     onConfirmSideChannel?: (confId: string, approved: boolean, sessionWhitelist: boolean) => Promise<void>;
 }
 
-export function ToolTimeline({ executions, botIdentity, onConfirmSideChannel }: ToolTimelineProps) {
+export function ToolTimeline({ executions, botIdentity, petState, petEnabled, preferAnimatedPet, petManifest, onConfirmSideChannel }: ToolTimelineProps) {
     const [expanded, setExpanded] = useState(false);
     const [selectedToolId, setSelectedToolId] = useState<string | null>(null);
     const [confirmationConfId, setConfirmationConfId] = useState<string | null>(null);
@@ -129,10 +134,14 @@ export function ToolTimeline({ executions, botIdentity, onConfirmSideChannel }: 
 
     return (
         <div className="flex w-full gap-4 max-w-[90%] min-w-0">
-            <Avatar className="h-9 w-9 mt-1 shrink-0 border border-border shadow-sm">
-                <AvatarImage src={botIdentity?.avatar || undefined} className="object-cover" />
-                <AvatarFallback className="bg-primary text-primary-foreground text-xs font-bold">Bot</AvatarFallback>
-            </Avatar>
+            <BotVisual
+                avatar={botIdentity?.avatar}
+                petState={petState}
+                petEnabled={petEnabled}
+                preferAnimatedPet={preferAnimatedPet}
+                manifest={petManifest}
+                size="chat"
+            />
 
             <div className="flex-1 min-w-0 overflow-hidden">
                 <div

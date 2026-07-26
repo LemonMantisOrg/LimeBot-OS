@@ -2,6 +2,8 @@ import { Sidebar } from "./Sidebar";
 import { useState } from "react";
 import { Menu, Wifi, WifiOff, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { BotVisual } from "@/components/pet/BotVisual";
+import type { PetManifest, PetState } from "@/lib/pet";
 
 interface AppLayoutProps {
     children: React.ReactNode;
@@ -10,6 +12,10 @@ interface AppLayoutProps {
     onNavigate?: (view: string) => void;
     pageTitle?: string;
     pageDescription?: string;
+    petState?: PetState;
+    petEnabled?: boolean;
+    preferAnimatedPet?: boolean;
+    petManifest?: PetManifest;
     runtimeStatus?: {
         isConnected: boolean;
         autonomousMode: boolean;
@@ -24,6 +30,10 @@ export function AppLayout({
     onNavigate,
     pageTitle,
     pageDescription,
+    petState,
+    petEnabled,
+    preferAnimatedPet,
+    petManifest,
     runtimeStatus,
 }: AppLayoutProps) {
     const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -39,6 +49,10 @@ export function AppLayout({
             <Sidebar
                 className="hidden md:flex"
                 botIdentity={botIdentity}
+                petState={petState}
+                petEnabled={petEnabled}
+                preferAnimatedPet={preferAnimatedPet}
+                petManifest={petManifest}
                 activeView={activeView}
                 onNavigate={onNavigate}
                 runtimeStatus={runtimeStatus}
@@ -52,7 +66,14 @@ export function AppLayout({
                     </Button>
                     <div className="min-w-0 flex-1 space-y-1">
                         <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                            <img src="/limesimple.png" alt="" className="h-4 w-4 shrink-0" />
+                            <BotVisual
+                                avatar={botIdentity?.avatar}
+                                petState={petState}
+                                petEnabled={petEnabled}
+                                preferAnimatedPet={preferAnimatedPet}
+                                manifest={petManifest}
+                                size="tiny"
+                            />
                             <span className="truncate">{botIdentity?.name || "LimeBot"}</span>
                             <span
                                 className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium normal-case tracking-normal ${
@@ -96,6 +117,10 @@ export function AppLayout({
                         <Sidebar
                             className="flex flex-1 min-h-0 h-full w-full m-0 border-none shadow-none"
                             botIdentity={botIdentity}
+                            petState={petState}
+                            petEnabled={petEnabled}
+                            preferAnimatedPet={preferAnimatedPet}
+                            petManifest={petManifest}
                             activeView={activeView}
                             onNavigate={handleNavigate}
                             runtimeStatus={runtimeStatus}
