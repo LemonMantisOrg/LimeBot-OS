@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hatch Pet"
+  short_description: "Create, validate, and package LimeBot v2 animated pets"
+  default_prompt: "Use $hatch-pet to create or validate an animated LimeBot pet from reference art."
