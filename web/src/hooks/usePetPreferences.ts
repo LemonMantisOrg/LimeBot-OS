@@ -3,7 +3,6 @@ import {
     findPetManifest,
     isPetManifest,
     normalizePetPreferences,
-    DEFAULT_PET_ID,
     PET_CATALOG,
     PET_PREFERENCES_STORAGE_KEY,
     type PetManifest,
@@ -19,15 +18,7 @@ function readPetPreferences(): PetPreferences {
 
     try {
         const raw: unknown = JSON.parse(window.localStorage.getItem(PET_PREFERENCES_STORAGE_KEY) || 'null');
-        if (raw && typeof raw === 'object') {
-            const stored = raw as Partial<PetPreferences>;
-            return {
-                enabled: stored.enabled !== false,
-                petId: typeof stored.petId === 'string' ? stored.petId : DEFAULT_PET_ID,
-                preferAnimatedPet: stored.preferAnimatedPet === true,
-            };
-        }
-        return normalizePetPreferences(null);
+        return normalizePetPreferences(raw);
     } catch {
         return normalizePetPreferences(null);
     }

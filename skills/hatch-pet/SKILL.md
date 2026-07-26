@@ -1,6 +1,6 @@
 ---
 name: hatch-pet
-description: Create, repair, validate, QA, and install LimeBot-compatible v2 animated pets from concepts, reference art, existing spritesheets, or Codex pet packages. Use for 8x11 atlases, 9 standard animation rows, 16 look directions, transparent WEBP packaging, or dashboard and browser-companion pet integration.
+description: Create, repair, validate, QA, and install LimeBot-compatible v2 animated pets from concepts, reference art, existing spritesheets, or LimeBot pet packages. Use for 8x11 atlases, 9 standard animation rows, 16 look directions, transparent WEBP packaging, or dashboard and browser-companion pet integration.
 ---
 
 # Hatch Pet
@@ -69,10 +69,10 @@ The browser companion uses the same manifest shape under `extension/public/pets/
 
 ```json
 {
-  "id": "crimson",
-  "displayName": "Crimson",
+  "id": "jennie",
+  "displayName": "Jennie",
   "spriteVersionNumber": 2,
-  "spritesheetPath": "/pets/crimson/spritesheet.webp",
+  "spritesheetPath": "/pets/jennie/spritesheet.webp",
   "frameWidth": 192,
   "frameHeight": 208,
   "columns": 8,
@@ -115,7 +115,7 @@ The browser companion uses the same manifest shape under `extension/public/pets/
 }
 ```
 
-Update the catalog index when adding a pet. Preserve the current custom-avatar fallback: a configured persona avatar may continue to render as a static avatar, while a missing avatar uses the selected animated pet. The first built-in pet is `crimson`.
+Update the catalog index when adding a pet. Preserve the current custom-avatar fallback: a configured persona avatar may continue to render as a static avatar, while a missing avatar uses the selected animated pet. The first built-in pet is `jennie`.
 
 Map runtime state conservatively:
 

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
     animationFramesForPet,
-    CRIMSON_PET,
+    JENNIE_PET,
     frameForPet,
     type PetDirection,
     type PetManifest,
@@ -20,7 +20,7 @@ type PetSpriteProps = {
 export function PetSprite({
     state = 'idle',
     direction,
-    manifest = CRIMSON_PET,
+    manifest = JENNIE_PET,
     size = 48,
     className = '',
     label,

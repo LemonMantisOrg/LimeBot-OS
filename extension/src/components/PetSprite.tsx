@@ -36,7 +36,7 @@ const FRAME_HEIGHT = 208;
 const COLUMNS = 8;
 const ROWS = 11;
 const FPS = 8;
-const CODEX_IDLE_DURATION_SCALE = 6;
+const PET_IDLE_DURATION_SCALE = 6;
 
 type AnimationFrame = {
   row: number;
@@ -48,7 +48,7 @@ function framesForStatus(status: CompanionStatus): AnimationFrame[] {
   const idleFrames = Array.from({ length: STATUS_FRAME_COUNT.idle }, (_, column) => ({
     row: STATUS_ROW.idle,
     column,
-    duration: STATUS_FRAME_DURATIONS.idle[column] * CODEX_IDLE_DURATION_SCALE,
+    duration: STATUS_FRAME_DURATIONS.idle[column] * PET_IDLE_DURATION_SCALE,
   }));
 
   if (status === 'idle' || status === 'offline') return idleFrames;
@@ -105,15 +105,15 @@ export function PetSprite({ status, size = 46, className = '', label }: PetSprit
 
   return (
     <span
-      aria-label={label || `Crimson ${status}`}
+      aria-label={label || `Jennie ${status}`}
       className={`mascot-pet ${className}`.trim()}
-      data-pet-id="crimson"
+      data-pet-id="jennie"
       data-pet-state={status}
       role="img"
       style={{
         width: `${size}px`,
         height: `${cellHeight}px`,
-        backgroundImage: 'url("/pets/crimson/spritesheet.webp")',
+        backgroundImage: 'url("/pets/jennie/spritesheet.webp")',
         backgroundPosition: `-${animationFrame.column * size}px -${animationFrame.row * cellHeight}px`,
         backgroundRepeat: 'no-repeat',
         backgroundSize: `${COLUMNS * size}px ${ROWS * cellHeight}px`,

@@ -51,15 +51,15 @@ export type PetAnimationFrame = {
     duration: number;
 };
 
-const CODEX_IDLE_DURATION_SCALE = 6;
-const CODEX_ACTIVE_STATE_REPEATS = 3;
+const PET_IDLE_DURATION_SCALE = 6;
+const PET_ACTIVE_STATE_REPEATS = 3;
 
-export const CRIMSON_PET: PetManifest = {
-    id: 'crimson',
-    displayName: 'Crimson',
-    description: 'A red-haired gothic schoolgirl Codex pet with a black outfit, expressive eyes, and lively gestures.',
+export const JENNIE_PET: PetManifest = {
+    id: 'jennie',
+    displayName: 'Jennie',
+    description: "Jennie is LimeBot's default showcase companion: a red-haired gothic schoolgirl with a black outfit, expressive eyes, and lively gestures.",
     spriteVersionNumber: 2,
-    spritesheetPath: '/pets/crimson/spritesheet.webp',
+    spritesheetPath: '/pets/jennie/spritesheet.webp',
     frameWidth: 192,
     frameHeight: 208,
     columns: 8,
@@ -101,8 +101,8 @@ export const CRIMSON_PET: PetManifest = {
     lookRows: { upper: 9, lower: 10 },
 };
 
-export const PET_CATALOG: readonly PetManifest[] = [CRIMSON_PET];
-export const DEFAULT_PET_ID = CRIMSON_PET.id;
+export const PET_CATALOG: readonly PetManifest[] = [JENNIE_PET];
+export const DEFAULT_PET_ID = JENNIE_PET.id;
 export const PET_PREFERENCES_STORAGE_KEY = 'limebot-pet-preferences';
 
 export type PetPreferences = {
@@ -115,7 +115,7 @@ export function findPetManifest(
     petId?: string | null,
     catalog: readonly PetManifest[] = PET_CATALOG,
 ): PetManifest {
-    return catalog.find((pet) => pet.id === petId) || catalog[0] || CRIMSON_PET;
+    return catalog.find((pet) => pet.id === petId) || catalog[0] || JENNIE_PET;
 }
 
 export function normalizePetPreferences(
@@ -191,18 +191,18 @@ function framesForRow(manifest: PetManifest, rowKey: string, durationScale = 1):
 }
 
 /**
- * Reproduce the Codex v2 avatar player: idle is intentionally slow, while
+ * Reproduce the LimeBot v2 avatar player: idle is intentionally slow, while
  * active states get three passes followed by a slow idle tail before looping.
  */
 export function animationFramesForPet(manifest: PetManifest, state: PetState): PetAnimationFrame[] {
     const stateRowKey = PET_STATE_ROW_KEYS[state] || 'idle';
-    const idleFrames = framesForRow(manifest, 'idle', CODEX_IDLE_DURATION_SCALE);
+    const idleFrames = framesForRow(manifest, 'idle', PET_IDLE_DURATION_SCALE);
 
     if (stateRowKey === 'idle') return idleFrames;
 
     const activeFrames = framesForRow(manifest, stateRowKey);
     return [
-        ...Array.from({ length: CODEX_ACTIVE_STATE_REPEATS }, () => activeFrames).flat(),
+        ...Array.from({ length: PET_ACTIVE_STATE_REPEATS }, () => activeFrames).flat(),
         ...idleFrames,
     ];
 }

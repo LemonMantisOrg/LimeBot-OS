@@ -1,6 +1,6 @@
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { PetSprite } from './PetSprite';
-import { CRIMSON_PET, type PetManifest, type PetState } from '@/lib/pet';
+import { JENNIE_PET, type PetManifest, type PetState } from '@/lib/pet';
 
 type BotVisualProps = {
     avatar?: string | null;
@@ -23,7 +23,7 @@ export function BotVisual({
     petState = 'idle',
     petEnabled = true,
     preferAnimatedPet = false,
-    manifest = CRIMSON_PET,
+    manifest = JENNIE_PET,
     size = 'chat',
 }: BotVisualProps) {
     const hasAvatar = !!avatar?.trim();

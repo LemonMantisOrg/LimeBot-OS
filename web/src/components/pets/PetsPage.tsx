@@ -103,7 +103,7 @@ export function PetsPage({ onNavigate }: PetsPageProps) {
                                     <span className="rounded-full border border-border/70 bg-background/60 px-2.5 py-1">8 × 11 frames</span>
                                     <span className="rounded-full border border-border/70 bg-background/60 px-2.5 py-1">16 look directions</span>
                                     <span className="rounded-full border border-border/70 bg-background/60 px-2.5 py-1">
-                                        {selectedPet.stateFrameDurations ? 'Codex timing' : `${selectedPet.fps} fps`}
+                                        {selectedPet.stateFrameDurations ? 'Pet timing' : `${selectedPet.fps} fps`}
                                     </span>
                                 </div>
                             </div>
