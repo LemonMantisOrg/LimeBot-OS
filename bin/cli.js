@@ -39,7 +39,7 @@ import {
     startBackgroundUpdateDiscovery,
     startupWaitTarget,
 } from './startup-flow.js';
-import { describeSupportedNode, isSupportedNodeVersion } from './runtime-support.js';
+import { describeSupportedNode, explainUnsupportedNode, isSupportedNodeVersion } from './runtime-support.js';
 import { cleanupStoppedTaskState } from './task-state.js';
 import { refreshWindowsProcessPath } from './windows-path.js';
 import {
@@ -1104,6 +1104,91 @@ function killPort(port) {
 
 // ── Commands ───────────────────────────────────────────────────────
 
+async function cmdSetup(args = []) {
+    const recommended = args.includes('--recommended') || args.includes('--browser');
+
+    console.log(`${colors.lime}${colors.bright}\n  🍋 LimeBot Setup${colors.reset}\n`);
+    info('This checks the apps LimeBot needs, writes a starter settings file,');
+    info('and can install a real browser so chat can click and download files.');
+    console.log('');
+
+    let issues = 0;
+
+    if (isSupportedNodeVersion(process.version)) {
+        success(`Node.js is ready: ${process.version}`);
+    } else {
+        error(`Node.js is not ready (${process.version}).`);
+        console.log(`\n${explainUnsupportedNode(process.version)}\n`);
+        issues++;
+    }
+
+    const pythonCmd = await getSystemPython();
+    if (await commandExists(pythonCmd)) {
+        const pythonInfo = await getPythonRuntimeInfo(pythonCmd);
+        if (pythonInfo.supported) {
+            success(`Python is ready: ${pythonInfo.versionText}`);
+        } else {
+            error(`Python is the wrong version: ${pythonInfo.versionText}`);
+            console.log(`\n${explainUnsupportedPython(pythonInfo)}\n`);
+            issues++;
+        }
+    } else {
+        error('Python is not installed (the app is named Python).');
+        console.log(`\n${explainUnsupportedPython({ versionText: 'not installed' })}\n`);
+        issues++;
+    }
+
+    const envPath = path.join(rootDir, '.env');
+    const examplePath = path.join(rootDir, '.env.example');
+    if (!fs.existsSync(envPath) && fs.existsSync(examplePath)) {
+        fs.copyFileSync(examplePath, envPath);
+        success('Created .env from the example. Open that file and paste your model key.');
+    } else if (fs.existsSync(envPath)) {
+        success('.env already exists and was left unchanged.');
+    } else {
+        warning('.env.example is missing, so a starter settings file was not created.');
+    }
+
+    if (recommended) {
+        if (issues) {
+            warning('Skipping browser install until Node.js and Python are ready.');
+        } else {
+            step('Installing the recommended browser extras (Playwright + Chromium)...');
+            await ensureBrowserAndChromium();
+        }
+    } else {
+        info('Want a real browser in one step? Run: npm run lime-bot setup -- --recommended');
+    }
+
+    console.log(`
+  ${colors.bright}Next:${colors.reset}
+  1. Open the .env file in Notepad, TextEdit, or the dashboard wizard.
+  2. Paste your model API key next to the matching name (for example OPENAI_API_KEY).
+  3. In this folder, run: npm start
+  4. Open http://localhost:5173 if a browser window does not appear.
+`);
+    if (issues) {
+        process.exitCode = 1;
+    }
+}
+
+function explainUnsupportedPython(info = {}) {
+    const found = String(info.versionText || 'an unknown version').trim();
+    return [
+        'LimeBot needs the app called Python, versions 3.11 through 3.14.',
+        `This computer currently has ${found}.`,
+        '',
+        'Do this next (no command-line experience needed):',
+        '1. Open https://www.python.org/downloads/ in your web browser.',
+        '2. Download Python 3.12 or 3.13 and run the installer.',
+        '3. On Windows, tick "Add python.exe to PATH" before you click Install.',
+        '4. Close every terminal window, open a new one, and type: python --version',
+        '5. Come back to the LimeBot folder and run: npm start',
+        '',
+        'LimeBot did not change any files yet.',
+    ].join('\n');
+}
+
 async function cmdHelp() {
     process.stdout.write(LOGO);
     console.log(`${colors.lime}${colors.bright}
@@ -1113,6 +1198,7 @@ ${colors.reset}
 
   ${colors.bright}Commands:${colors.reset}
     ${colors.cyan}start${colors.reset}            Start LimeBot (backend + frontend)
+    ${colors.cyan}setup${colors.reset}            First-run helper: check apps, write .env, install browser
     ${colors.cyan}stop${colors.reset}             Stop all running LimeBot processes
     ${colors.cyan}status${colors.reset}           Check if LimeBot services are running
     ${colors.cyan}update${colors.reset}           Safely fast-forward source and preserve local state
@@ -1302,7 +1388,7 @@ async function cmdDoctor(args = []) {
             success(`Python installed: ${pythonInfo.versionText} (${pythonCmd})`);
         } else {
             error(`Unsupported Python installed: ${pythonInfo.versionText} (${pythonCmd})`);
-            info(`Expected ${describeSupportedPython()}.`);
+            console.log(`\n${explainUnsupportedPython(pythonInfo)}\n`);
             issues++;
         }
     } else {
@@ -1315,11 +1401,13 @@ async function cmdDoctor(args = []) {
             success(`Node.js installed: ${nodeVersion}`);
         } else {
             error(`Unsupported Node.js installed: ${nodeVersion || 'unknown version'}`);
-            info(`Expected ${describeSupportedNode()}.`);
+            console.log(`\n${explainUnsupportedNode(nodeVersion)}\n`);
             issues++;
         }
     } else {
-        error('Node.js not found in PATH'); issues++;
+        error('Node.js is not installed (the app is named Node.js).');
+        console.log(`\n${explainUnsupportedNode('not installed')}\n`);
+        issues++;
     }
 
     if (await commandExists('npm')) {
@@ -2425,16 +2513,25 @@ async function cmdStart(args, updateStatus = null) {
 // ── Entry point ───────────────────────────────────────────────────
 
 async function main() {
+    const previewArgs = process.argv.slice(2);
+    const previewCommand = previewArgs[0]?.toLowerCase() || 'help';
+    const nodeOptionalCommands = new Set([
+        'help', '--help', '-h', 'setup', 'doctor', 'status', 'logs', 'stop',
+    ]);
     if (!isSupportedNodeVersion(process.version)) {
-        error(`LimeBot requires ${describeSupportedNode()}; found ${process.version}.`);
-        info('Upgrade Node.js, then run this command again. No setup files were changed.');
-        process.exit(1);
+        if (!nodeOptionalCommands.has(previewCommand)) {
+            error(`LimeBot cannot start yet.`);
+            console.log(`\n${explainUnsupportedNode(process.version)}\n`);
+            process.exit(1);
+        }
+        warning(`This computer has Node.js ${process.version}. Starting LimeBot still needs 22.19+.`);
+        console.log(`\n${explainUnsupportedNode(process.version)}\n`);
     }
 
     await refreshWindowsProcessPath();
 
-    const args = process.argv.slice(2);
-    const command = args[0]?.toLowerCase() || 'help';
+    const args = previewArgs;
+    const command = previewCommand;
     const updateStatusCommands = new Set(['start', 'status', 'doctor', 'skill', 'install-browser']);
     const quickStart = command === 'start' && (args.includes('--quick') || args.includes('-q'));
     const updateStatus = command === 'start'
@@ -2448,6 +2545,7 @@ async function main() {
     }
 
     switch (command) {
+        case 'setup': await cmdSetup(args.slice(1)); break;
         case 'start': await cmdStart(args.slice(1), updateStatus); break;
         case 'stop': await cmdStop(); break;
         case 'status': await cmdStatus(); break;

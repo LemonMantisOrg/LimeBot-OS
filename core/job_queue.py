@@ -135,10 +135,16 @@ class Job:
         metadata = dict(msg.metadata or {})
         metadata["durable_job_id"] = self.id
         metadata["durable"] = True
-        metadata["unattended"] = True
         if self.cron_job_id:
             metadata["is_scheduler"] = True
             metadata["original_job_id"] = self.cron_job_id
+        # Live chat jobs stay confirmation-gated after resume. Only scheduled
+        # or already-unattended work keeps the unattended flag.
+        metadata["unattended"] = bool(
+            metadata.get("unattended")
+            or metadata.get("is_scheduler")
+            or self.kind == "cron"
+        )
         msg.metadata = metadata
         return msg
 
@@ -220,6 +226,7 @@ class DurableJobQueue:
         cron_job_id: Optional[str] = None,
         max_attempts: int = 3,
         job_id: Optional[str] = None,
+        unattended: Optional[bool] = None,
     ) -> Job:
         """Persist work before the in-memory bus sees it."""
         now = time.time()
@@ -227,10 +234,16 @@ class DurableJobQueue:
         durable_id = job_id or str(metadata.get("durable_job_id") or uuid.uuid4().hex)
         metadata["durable_job_id"] = durable_id
         metadata["durable"] = True
-        metadata["unattended"] = True
         if cron_job_id:
             metadata["is_scheduler"] = True
             metadata["original_job_id"] = cron_job_id
+        if unattended is None:
+            unattended = bool(
+                metadata.get("unattended")
+                or metadata.get("is_scheduler")
+                or kind == "cron"
+            )
+        metadata["unattended"] = bool(unattended)
         msg.metadata = metadata
         payload = serialize_inbound(msg)
         job = Job(
@@ -543,3 +556,31 @@ def reset_job_queue() -> None:
     global _instance
     with _instance_lock:
         _instance = None
+
+
+def persist_user_inbound(
+    msg: InboundMessage,
+    *,
+    kind: str = "chat",
+    queue: Optional[DurableJobQueue] = None,
+) -> InboundMessage:
+    """Persist a live user turn before the agent runs.
+
+    Scheduled work stays unattended. Companion/web/Discord chats are durable
+    but remain confirmation-gated after resume.
+    """
+    metadata = dict(msg.metadata or {})
+    if metadata.get("durable_job_id"):
+        return msg
+    if metadata.get("is_confirmation"):
+        return msg
+    content = str(getattr(msg, "content", "") or "").strip()
+    if not content:
+        return msg
+    store = queue if queue is not None else get_job_queue()
+    store.enqueue(
+        msg,
+        kind=kind,
+        unattended=bool(metadata.get("unattended") or metadata.get("is_scheduler")),
+    )
+    return msg

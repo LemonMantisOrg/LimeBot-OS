@@ -3508,9 +3508,10 @@ class AgentLoop:
             workspace_instructions = ""
             if isolated_workspace is not None:
                 workspace_instructions = (
-                    "Workspace isolation: You are working in a temporary copy of the project. "
-                    "Use relative paths from the workspace root; do not use parent-directory paths "
-                    "or absolute paths into the live project. Changes are not merged automatically. "
+                    "Workspace isolation: Relative writes go to a temporary copy of the project "
+                    "and are not merged automatically. You MAY read the same allowed absolute "
+                    "paths the parent can read (project roots, AGENTS.md, persona/, temp/). "
+                    "Do not invent 'permission denied' when those files exist. "
                     "At the end, report changed files and verification results.\n"
                 )
 
@@ -4312,6 +4313,8 @@ class AgentLoop:
                     args.get("element_id", ""),
                     args.get("filename", ""),
                     args.get("timeout_ms", 30_000),
+                    args.get("dest", ""),
+                    args.get("url", ""),
                 ),
                 "browser_type": lambda: browser.type_text(
                     args.get("element_id", ""), args.get("text", "")
@@ -4359,6 +4362,7 @@ class AgentLoop:
                         ("note", "**Note:**"),
                         ("warning", "**Warning:**"),
                         ("message", None),
+                        ("path", "**Saved path:**"),
                         ("elements", "**Elements:**"),
                         ("media_summary", None),
                     ]:
@@ -4379,6 +4383,10 @@ class AgentLoop:
             return str(result)
 
         except Exception as e:
+            from core.browser import BROWSER_INSTALL_HINT, PLAYWRIGHT_AVAILABLE
+
+            if not PLAYWRIGHT_AVAILABLE or BROWSER_INSTALL_HINT in str(e):
+                return f"Error: {BROWSER_INSTALL_HINT}"
             logger.exception(
                 "Browser tool execution failed: "
                 f"{function_name} args={redact_sensitive_text(args)}"
@@ -8841,15 +8849,31 @@ class AgentLoop:
                             error="Inbound turn cancelled.",
                         )
                     elif unresolved_tool_failure:
-                        await _tracker.update_task(
-                            _msg_task_id,
-                            status="failed",
-                            error=(
-                                "Tool recovery exhausted or ended with an unresolved "
-                                "failure: "
-                                + redact_sensitive_text(unresolved_failure_detail)[:500]
-                            ),
+                        durable_id = (
+                            msg.metadata.get("durable_job_id")
+                            if isinstance(getattr(msg, "metadata", None), dict)
+                            else None
                         )
+                        queue = getattr(self, "job_queue", None)
+                        existing = (
+                            queue.get(str(durable_id))
+                            if durable_id and queue is not None
+                            else None
+                        )
+                        if existing is not None and existing.side_effects:
+                            # Writes already landed; a stale/broken follow-up
+                            # edit must not mark the durable job failed.
+                            await _tracker.complete_task(_msg_task_id)
+                        else:
+                            await _tracker.update_task(
+                                _msg_task_id,
+                                status="failed",
+                                error=(
+                                    "Tool recovery exhausted or ended with an unresolved "
+                                    "failure: "
+                                    + redact_sensitive_text(unresolved_failure_detail)[:500]
+                                ),
+                            )
                     else:
                         await _tracker.complete_task(_msg_task_id)
             self._evict_history_image_inputs(session_key)

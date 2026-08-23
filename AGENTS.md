@@ -17,7 +17,7 @@ LimeBot is an **event-driven agentic system**. Every user interaction is an `Inb
 Channel (Discord / WhatsApp / Web / Telegram) or CronManager
         │  InboundMessage
         ▼
-   DurableJobQueue (SQLite) for scheduled/queued work
+   DurableJobQueue (SQLite) for cron, queued work, and live companion/web chat
         │  then MessageBus (asyncio.Queue)
         ▼
    AgentLoop._process_message()
@@ -135,7 +135,7 @@ Sandboxed OS interface. All methods check `_is_path_allowed()` before touching t
 |------|-----------------------|-------------|
 | `capability_search(query, include_disabled)` | No | Resolve native tools, skills, MCP servers/tools, and subagents against a redacted capability snapshot; use before claiming an integration is unavailable |
 | `read_file(path, include_hash)` | No | Read file contents (20k char limit); optionally return the raw-file SHA-256 for stale-edit protection |
-| `edit_file(path, edits, expected_sha256)` | **Yes** | Apply exact, preflighted, atomic UTF-8 text edits with hash/anchor/no-op guards and a bounded diff |
+| `edit_file(path, edits, expected_sha256)` | **Yes** | Apply exact, preflighted, atomic UTF-8 text edits with hash/anchor/no-op guards and a bounded diff. If the intended text is already on disk after a crash resume, returns `already_applied` instead of failing the job. |
 | `write_file(path, content)` | **Yes** | Create or overwrite a file |
 | `verify_files(paths, include_diagnostics)` | No | Run bounded read-only conflict-marker, syntax, TOML/JSON/Python, and Git whitespace checks; optionally invoke installed diagnostics |
 | `diagnose_files(paths, provider)` | No | Optionally run installed Ruff, Pyright, ESLint, or TypeScript diagnostics through direct subprocess arguments; missing providers return `skipped` |
@@ -401,7 +401,7 @@ skills/
 ```json
 {
   "skills": {
-    "enabled": ["browser", "download_image", "filesystem", "discord", "docx-creator", "scrapling"]
+    "enabled": ["browser", "download_image", "filesystem", "discord", "docx-creator", "scrapling", "vm-lab"]
   }
 }
 ```
@@ -419,6 +419,8 @@ npm run lime-bot skill install https://github.com/user/skill-repo
 ```
 
 Only registered enabled skill names and their configured aliases can be invoked this way. Raw `SKILL.md` paths or arbitrary filesystem-style slash strings are rejected.
+
+`vm-lab` is the allowlisted QEMU/KVM helper (`python skills/vm-lab/vm_lab.py ...`). Destinations stay under `ALLOWED_PATHS` or `$LIMEBOT_STATE_DIR/vm-lab`. Isolated explorer/reviewer reads inherit the parent allowlist so they can see `AGENTS.md` and allowlisted `temp/` without inventing permission errors.
 
 ---
 
@@ -456,7 +458,9 @@ Sensitive tools: `edit_file`, `write_file`, `delete_file`, `run_command`, `cron_
 
 ### Durable job queue (`core/job_queue.py`)
 
-SQLite at `data/jobs.sqlite` (or `$LIMEBOT_STATE_DIR/data/jobs.sqlite`). Cron and explicit queued work persist **before** `publish_inbound`. States: `queued` → `running` → `succeeded|failed|cancelled`. Exclusive lease + heartbeat. On boot, interrupted `running` jobs are re-queued instead of fail-closed. Transient provider errors retry with backoff unless an irreversible tool already succeeded. Cron `last_status=ok` is written only from `CronManager.mark_run_finished()` after the agent turn ends.
+SQLite at `data/jobs.sqlite` (or `$LIMEBOT_STATE_DIR/data/jobs.sqlite`). Cron, explicit queued work, and live companion/web/Discord chats persist **before** `publish_inbound` via `persist_user_inbound()`. Chat jobs stay confirmation-gated (`unattended=false`). States: `queued` → `running` → `succeeded|failed|cancelled`. Exclusive lease + heartbeat. On boot, interrupted `running` jobs are re-queued instead of vanish or fail-closed. Transient provider errors retry with backoff unless an irreversible tool already succeeded. If writes already landed and a later `edit_file` is stale, the turn completes instead of marking the job failed. Cron `last_status=ok` is written only from `CronManager.mark_run_finished()` after the agent turn ends.
+
+Copy-isolated sub-agents may still **read** the parent `source_root` and the parent's `ALLOWED_PATHS` (so `AGENTS.md` and allowlisted `temp/` are visible). Writes stay in the temporary clone.
 
 TaskTracker's JSON projection still fail-closes dead coroutines for the dashboard. The SQLite queue is the source of truth for work that must resume.
 
@@ -515,6 +519,7 @@ npm run lime-bot <command> [options]
 
 | Command | Description |
 |---------|-------------|
+| `setup` | First-run helper: check Node/Python in plain language, write `.env`, optionally `--recommended` browser + Chromium |
 | `start` | Start backend + frontend (auto-install on first run) |
 | `start -- --quick` | Fast boot, skip dependency and update checks |
 | `stop` | Kill all LimeBot processes |

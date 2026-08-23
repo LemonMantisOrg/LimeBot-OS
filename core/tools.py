@@ -472,8 +472,15 @@ class Toolbox:
             return None, None
         return root, source_root
 
-    def _resolve_tool_path(self, path_str: Union[str, Path]) -> Path:
-        """Resolve a tool path inside the active isolated workspace when present."""
+    def _resolve_tool_path(
+        self, path_str: Union[str, Path], *, for_write: bool = False
+    ) -> Path:
+        """Resolve a tool path inside the active isolated workspace when present.
+
+        Writes stay in the temporary clone. Reads fall back to the live
+        source or other parent-allowed roots so explorer/reviewer can see
+        AGENTS.md and allowlisted temp/ instead of inventing a denial.
+        """
         raw = Path(path_str).expanduser()
         workspace_root, source_root = self._active_workspace_paths()
         if workspace_root is None or source_root is None:
@@ -487,7 +494,12 @@ class Toolbox:
                 relative = resolved.relative_to(source_root)
             except ValueError:
                 return resolved
-            return (workspace_root / relative).resolve()
+            remapped = (workspace_root / relative).resolve()
+            if for_write:
+                return remapped
+            if remapped.exists() or not resolved.exists():
+                return remapped
+            return resolved
 
         # A relative argument may still spell a path under the source root
         # (for example ``temp/project/file.py`` when the project root is the
@@ -499,7 +511,12 @@ class Toolbox:
         except (OSError, ValueError):
             relative = None
         if relative is not None:
-            return (workspace_root / relative).resolve()
+            remapped = (workspace_root / relative).resolve()
+            if for_write:
+                return remapped
+            if remapped.exists() or not resolved.exists():
+                return remapped
+            return resolved
         return (workspace_root / raw).resolve()
 
     def _active_tool_root(self) -> Path:
@@ -520,9 +537,14 @@ class Toolbox:
             ):
                 return False
 
-            workspace_root, _ = self._active_workspace_paths()
+            workspace_root, source_root = self._active_workspace_paths()
             if workspace_root is not None:
-                return target_path == workspace_root or workspace_root in target_path.parents
+                if target_path == workspace_root or workspace_root in target_path.parents:
+                    return True
+                if source_root is not None and (
+                    target_path == source_root or source_root in target_path.parents
+                ):
+                    return True
             for allowed in self.allowed_paths:
                 if target_path == allowed or allowed in target_path.parents:
                     return True
@@ -865,7 +887,7 @@ class Toolbox:
         """Write content to a file."""
         if not self._is_path_allowed(path):
             return f"Error: Access denied to path '{path}'."
-        p = self._resolve_tool_path(path)
+        p = self._resolve_tool_path(path, for_write=True)
         if self._is_persona_managed_path(p):
             return self._persona_write_error()
 
@@ -891,7 +913,7 @@ class Toolbox:
         if not self._is_path_allowed(path):
             return f"Error: Access denied to path '{path}'."
 
-        target = self._resolve_tool_path(path)
+        target = self._resolve_tool_path(path, for_write=True)
         if self._is_persona_managed_path(target):
             return self._persona_write_error()
         if not target.exists():
@@ -913,12 +935,29 @@ class Toolbox:
 
             original_bytes = await asyncio.to_thread(target.read_bytes)
             current_sha256 = hashlib.sha256(original_bytes).hexdigest()
+            original = original_bytes.decode("utf-8")
             if current_sha256 != expected:
+                from core.file_edits import intended_edits_already_present
+
+                if intended_edits_already_present(original, edits):
+                    return json.dumps(
+                        {
+                            "status": "already_applied",
+                            "path": self._to_display_path(target),
+                            "replacements": 0,
+                            "sha256_before": current_sha256,
+                            "sha256_after": current_sha256,
+                            "detail": (
+                                "Skipped stale edit; the intended text is "
+                                "already on disk."
+                            ),
+                        },
+                        ensure_ascii=False,
+                    )
                 return (
                     "Error: Stale edit rejected. The file's SHA-256 is "
                     f"{current_sha256}, not {expected}; re-read the file and retry."
                 )
-            original = original_bytes.decode("utf-8")
         except UnicodeDecodeError:
             return "Error: edit_file only supports UTF-8 text files."
         except OSError as exc:
@@ -927,7 +966,39 @@ class Toolbox:
         try:
             updated, replacement_count = apply_text_edits(original, edits)
         except EditValidationError as exc:
+            from core.file_edits import intended_edits_already_present
+
+            if intended_edits_already_present(original, edits):
+                current_sha256 = hashlib.sha256(original.encode("utf-8")).hexdigest()
+                return json.dumps(
+                    {
+                        "status": "already_applied",
+                        "path": self._to_display_path(target),
+                        "replacements": 0,
+                        "sha256_before": current_sha256,
+                        "sha256_after": current_sha256,
+                        "detail": (
+                            "Skipped unusable edit; the intended text is "
+                            "already on disk."
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
             return f"Error: Edit rejected: {exc}"
+
+        if replacement_count == 0 or updated == original:
+            current_sha256 = hashlib.sha256(original.encode("utf-8")).hexdigest()
+            return json.dumps(
+                {
+                    "status": "already_applied",
+                    "path": self._to_display_path(target),
+                    "replacements": 0,
+                    "sha256_before": current_sha256,
+                    "sha256_after": current_sha256,
+                    "detail": "No file change; intended text is already on disk.",
+                },
+                ensure_ascii=False,
+            )
 
         diff = unified_text_diff(
             original,
@@ -1306,7 +1377,7 @@ class Toolbox:
         """Create a styled, formula-capable XLSX workbook as a native tool."""
         if not self._is_path_allowed(path):
             return f"Error: Access denied to path '{path}'."
-        target = self._resolve_tool_path(path)
+        target = self._resolve_tool_path(path, for_write=True)
         if target.suffix.lower() != ".xlsx":
             return "Error: create_spreadsheet requires a path ending in .xlsx."
         if self._is_persona_managed_path(target):
@@ -1434,7 +1505,7 @@ class Toolbox:
         """Delete a file or directory."""
         if not self._is_path_allowed(path):
             return f"Error: Access denied to path '{path}'."
-        p = self._resolve_tool_path(path)
+        p = self._resolve_tool_path(path, for_write=True)
         if self._is_persona_managed_path(p):
             return (
                 "Error: Direct deletion of state-managed files under 'persona/' is blocked. "

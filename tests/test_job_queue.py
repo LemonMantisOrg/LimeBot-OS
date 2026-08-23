@@ -11,6 +11,7 @@ from core.job_queue import (
     SUCCEEDED,
     DurableJobQueue,
     is_transient_error,
+    persist_user_inbound,
 )
 
 
@@ -69,6 +70,36 @@ class TestDurableJobQueue(unittest.TestCase):
         failed = later.fail_or_retry(job.id, "503 again")
         self.assertEqual(failed.status, FAILED)
         self.assertIn("irreversible", failed.last_error)
+
+    def test_chat_enqueue_is_durable_but_not_unattended(self):
+        msg = InboundMessage(
+            channel="web",
+            sender_id="user",
+            chat_id="app_1",
+            content="Write two files then edit one.",
+            metadata={"workspace_id": "abc", "source": "app"},
+        )
+        persist_user_inbound(msg, kind="chat", queue=self.queue)
+        job = self.queue.get(msg.metadata["durable_job_id"])
+        self.assertIsNotNone(job)
+        self.assertEqual(job.kind, "chat")
+        self.assertFalse(job.payload["metadata"]["unattended"])
+        replay = job.to_message()
+        self.assertTrue(replay.metadata["durable"])
+        self.assertFalse(replay.metadata["unattended"])
+        self.assertEqual(replay.metadata["workspace_id"], "abc")
+
+    def test_cron_enqueue_stays_unattended(self):
+        msg = InboundMessage(
+            channel="web",
+            sender_id="cron",
+            chat_id="jobs",
+            content="scheduled",
+            metadata={"is_scheduler": True},
+        )
+        job = self.queue.enqueue(msg, kind="cron", cron_job_id="cron1")
+        self.assertTrue(job.payload["metadata"]["unattended"])
+        self.assertTrue(job.to_message().metadata["unattended"])
 
     def test_non_transient_error_fails_closed(self):
         job = self.queue.enqueue(self._msg())

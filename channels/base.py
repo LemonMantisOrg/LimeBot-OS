@@ -51,6 +51,9 @@ class BaseChannel(ABC):
             media=media or [],
             metadata=metadata or {},
         )
+        from core.job_queue import persist_user_inbound
+
+        persist_user_inbound(msg, kind="chat")
         await self.bus.publish_inbound(msg)
 
     def is_allowed(self, sender_id: str) -> bool:

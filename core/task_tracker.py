@@ -256,6 +256,11 @@ class TaskTracker:
         except Exception as e:
             logger.error(f"TaskTracker: flush failed: {e}")
 
+    async def flush(self) -> None:
+        """Write the latest snapshot immediately so crash-resume can see it."""
+        self._flush_pending = False
+        await asyncio.to_thread(self._flush_sync)
+
     async def _schedule_flush(self) -> None:
         if self._flush_pending:
             return
@@ -466,7 +471,7 @@ class TaskTracker:
         )
         async with self._lock:
             self._workspaces[workspace.workspace_id] = workspace
-            await self._schedule_flush()
+            await self.flush()
             return self._copy_workspace(workspace)
 
     async def update_workspace(
@@ -567,7 +572,7 @@ class TaskTracker:
             workspace.updated_at = now
             if status == TaskStatus.RUNNING.value and workspace.started_at == 0.0:
                 workspace.started_at = now
-            await self._schedule_flush()
+            await self.flush()
             return WorkspaceAttempt(**asdict(attempt))
 
     async def complete_workspace_attempt(

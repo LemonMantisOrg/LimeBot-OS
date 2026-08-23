@@ -83,6 +83,26 @@ class TestTaskWorkspace(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored.metadata["source"], "test")
             self.assertEqual(stored.metadata["ticket"], "LIME-10")
 
+    async def test_create_workspace_is_visible_immediately_after_kill(self):
+        from core.task_tracker import TaskTracker
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tracker = TaskTracker(data_dir=tmpdir)
+            workspace = await tracker.create_workspace(
+                "Companion chat",
+                "app",
+                metadata={"source": "app"},
+            )
+            data_file = Path(tmpdir) / "tasks.json"
+            self.assertTrue(data_file.exists())
+            payload = data_file.read_text(encoding="utf-8")
+            self.assertIn(workspace.workspace_id, payload)
+
+            reloaded = TaskTracker(data_dir=tmpdir)
+            stored = await reloaded.get_workspace(workspace.workspace_id)
+            self.assertIsNotNone(stored)
+            self.assertEqual(stored.title, "Companion chat")
+
     async def test_workspace_listing_filters_terminal_items(self):
         from core.task_tracker import TaskStatus, TaskTracker
 

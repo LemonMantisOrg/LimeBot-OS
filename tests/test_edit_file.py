@@ -116,6 +116,48 @@ class TestExactFileEdits(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"[File SHA-256: {expected}]", result)
         self.assertIn("hash me", result)
 
+    def test_apply_text_edits_skips_already_applied_change(self):
+        from core.file_edits import apply_text_edits, intended_edits_already_present
+
+        original = "# QA Checklist\n- [ ] Briefing cross-checked.\n"
+        updated, count = apply_text_edits(
+            original,
+            [
+                {
+                    "old_text": "- [ ] missing line",
+                    "new_text": "- [ ] Briefing cross-checked.",
+                }
+            ],
+        )
+        self.assertEqual(count, 0)
+        self.assertEqual(updated, original)
+        self.assertTrue(
+            intended_edits_already_present(
+                original,
+                [{"old_text": "", "new_text": "- [ ] Briefing cross-checked."}],
+            )
+        )
+
+    async def test_edit_file_succeeds_when_stale_hash_but_text_exists(self):
+        from core.bus import MessageBus
+        from core.tools import Toolbox
+
+        path = self.root / "done.md"
+        path.write_text("# Plan\n- [x] written\n", encoding="utf-8")
+        stale = hashlib.sha256(b"old").hexdigest()
+        config = SimpleNamespace(skills=SimpleNamespace(enabled=[]))
+        toolbox = Toolbox(
+            allowed_paths=[str(Path.cwd())], bus=MessageBus(), config=config
+        )
+        result = await toolbox.edit_file(
+            str(path),
+            [{"old_text": "- [ ] written", "new_text": "- [x] written"}],
+            stale,
+        )
+        payload = json.loads(result)
+        self.assertEqual(payload["status"], "already_applied")
+        self.assertEqual(path.read_text(encoding="utf-8"), "# Plan\n- [x] written\n")
+
     async def test_verify_files_reports_syntax_and_conflict_errors(self):
         from core.bus import MessageBus
         from core.tools import Toolbox

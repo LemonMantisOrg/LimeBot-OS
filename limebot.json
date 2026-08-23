@@ -6,7 +6,8 @@
       "filesystem",
       "discord",
       "docx-creator",
-      "scrapling"
+      "scrapling",
+      "vm-lab"
     ],
     "installed": {}
   },
