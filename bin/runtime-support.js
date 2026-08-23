@@ -25,3 +25,19 @@ export function describeSupportedNode() {
     const { major, minor, patch } = MIN_NODE_VERSION;
     return `Node.js ${major}.${minor}.${patch} or newer`;
 }
+
+export function explainUnsupportedNode(foundVersion) {
+    const found = String(foundVersion || '').trim() || 'an unknown version';
+    return [
+        `LimeBot needs the app called Node.js, version ${MIN_NODE_VERSION.major}.${MIN_NODE_VERSION.minor} or newer.`,
+        `This computer currently has ${found}.`,
+        '',
+        'Do this next (no command-line experience needed):',
+        '1. Open https://nodejs.org in your web browser.',
+        `2. Download the ${MIN_NODE_VERSION.major} LTS installer (${MIN_NODE_VERSION.major}.${MIN_NODE_VERSION.minor} or newer) and run it.`,
+        '3. Close every terminal window, open a new one, and type: node --version',
+        '4. Come back to the LimeBot folder and run: npm start',
+        '',
+        'LimeBot did not change any files yet.',
+    ].join('\n');
+}

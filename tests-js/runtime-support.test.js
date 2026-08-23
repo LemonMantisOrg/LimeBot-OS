@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
     describeSupportedNode,
+    explainUnsupportedNode,
     isSupportedNodeVersion,
     parseNodeVersion,
 } from '../bin/runtime-support.js';
@@ -26,12 +27,20 @@ test('LimeBot rejects runtimes below the frontend toolchain minimum', () => {
     assert.match(describeSupportedNode(), /22\.19\.0/);
 });
 
-test('CLI rejects an old Node runtime before command dispatch', () => {
+test('unsupported Node text tells a non-technical user what to install next', () => {
+    const text = explainUnsupportedNode('v22.14.0');
+    assert.match(text, /app called Node\.js/);
+    assert.match(text, /nodejs\.org/);
+    assert.match(text, /v22\.14\.0/);
+    assert.doesNotMatch(text, /stack/i);
+});
+
+test('CLI rejects start on an old Node runtime with a plain-language next step', () => {
     const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
     const cliUrl = pathToFileURL(path.join(rootDir, 'bin', 'cli.js')).href;
     const script = [
         "Object.defineProperty(process, 'version', { value: 'v18.20.8' });",
-        "process.argv = [process.execPath, 'bin/cli.js', 'help'];",
+        "process.argv = [process.execPath, 'bin/cli.js', 'start'];",
         `await import(${JSON.stringify(cliUrl)});`,
     ].join('');
     const result = spawnSync(process.execPath, ['--input-type=module', '--eval', script], {
@@ -40,6 +49,7 @@ test('CLI rejects an old Node runtime before command dispatch', () => {
     });
 
     assert.equal(result.status, 1);
-    assert.match(result.stdout, /requires Node\.js 22\.19\.0 or newer/);
+    assert.match(result.stdout, /app called Node\.js/);
+    assert.match(result.stdout, /nodejs\.org/);
     assert.doesNotMatch(result.stdout, /Commands:/);
 });

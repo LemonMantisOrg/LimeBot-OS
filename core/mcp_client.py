@@ -75,14 +75,26 @@ def validate_mcp_config(data: Dict[str, Any]) -> Tuple[bool, str]:
         if not isinstance(cfg, dict):
             return False, f"Config for '{name}' must be an object."
         command = cfg.get("command")
-        if not isinstance(command, str) or not command.strip():
+        url = cfg.get("url")
+        transport = str(cfg.get("type") or "").strip().lower()
+        is_http = transport in {"http", "sse"} or (
+            isinstance(url, str) and bool(url.strip())
+        )
+        if is_http:
+            if not isinstance(url, str) or not url.strip():
+                return False, f"'{name}.url' must be a non-empty string for HTTP MCP."
+        elif not isinstance(command, str) or not command.strip():
             return False, f"'{name}.command' must be a non-empty string."
         args = cfg.get("args", [])
+        if args is None:
+            args = []
         if not isinstance(args, list) or any(not isinstance(a, str) for a in args):
             return False, f"'{name}.args' must be an array of strings."
         if len(args) > 64:
             return False, f"'{name}.args' is too long (max 64)."
         env = cfg.get("env", {})
+        if env is None:
+            env = {}
         if not isinstance(env, dict) or any(
             (not isinstance(k, str) or not isinstance(v, str)) for k, v in env.items()
         ):
@@ -145,6 +157,20 @@ class MCPManager:
 
     async def _connect_server(self, name: str, cfg: Dict[str, Any]):
         command = cfg.get("command")
+        url = str(cfg.get("url") or "").strip()
+        transport = str(cfg.get("type") or "").strip().lower()
+        if transport in {"http", "sse"} or (url and not command):
+            self._mark_error(
+                name,
+                "HTTP/SSE MCP transports are recorded but not connected by the stdio client.",
+            )
+            logger.info(
+                "Recorded HTTP MCP server '%s' at %s without opening a stdio session.",
+                name,
+                url or "(missing url)",
+            )
+            return
+
         args = cfg.get("args", [])
         env = build_server_env(cfg.get("env", {}))
         args = expand_server_args(args, env)

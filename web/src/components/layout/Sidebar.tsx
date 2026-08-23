@@ -18,11 +18,9 @@ import {
     List,
     Globe,
     Volume2,
-    PawPrint
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { BotVisual } from "@/components/pet/BotVisual";
-import type { PetState } from "@/lib/pet";
 import { useEffect, useState } from "react";
 import axios from "axios";
 import { API_BASE_URL } from "@/lib/api";
@@ -37,10 +35,6 @@ import {
 interface SidebarProps {
     className?: string;
     botIdentity?: { name: string; avatar: string | null };
-    petState?: PetState;
-    petEnabled?: boolean;
-    preferAnimatedPet?: boolean;
-    petManifest?: import("@/lib/pet").PetManifest;
     activeView?: string;
     onNavigate?: (view: string) => void;
     runtimeStatus?: {
@@ -53,10 +47,6 @@ interface SidebarProps {
 export function Sidebar({
     className,
     botIdentity,
-    petState,
-    petEnabled,
-    preferAnimatedPet,
-    petManifest,
     activeView = 'chat',
     onNavigate,
     runtimeStatus,
@@ -121,7 +111,6 @@ export function Sidebar({
 
     const configItems = [
         { id: 'persona', icon: User2, label: "Persona" },
-        { id: 'pets', icon: PawPrint, label: "Pets" },
         { id: 'appearance', icon: Palette, label: "Appearance" },
         { id: 'config', icon: Settings, label: "Configuration" }
     ];
@@ -190,10 +179,6 @@ export function Sidebar({
                 >
                     <BotVisual
                         avatar={botIdentity?.avatar}
-                        petState={petState}
-                        petEnabled={petEnabled}
-                        preferAnimatedPet={preferAnimatedPet}
-                        manifest={petManifest}
                         size="sidebar"
                     />
                     <span className="text-foreground group-hover:text-primary transition-colors">{botIdentity?.name || "LimeBot"}</span>

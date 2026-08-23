@@ -720,27 +720,35 @@ BROWSER_TOOLS = [
     {
         "name": "browser_download",
         "description": (
-            "Click an element that starts a file download and save it inside LimeBot's "
-            "allowed temp/downloads directory. Use this instead of browser_click for "
-            "Export, Download, Excel, CSV, PDF, or similar controls. Returns the exact "
-            "local path for read_file, list_dir, run_command, or send_media. Run "
-            "browser_snapshot first."
+            "Download a real file through the browser into an allowlisted path. "
+            "Use element_id after a snapshot for Export/Download buttons, or url= "
+            "for a direct file link (ISO, installer, zip). Saves under temp/downloads "
+            "or dest= under temp/ / LIMEBOT_STATE_DIR. Returns the exact local path. "
+            "Large files may take minutes; raise timeout_ms up to 1800000."
         ),
         "params": {
             "element_id": {
                 "type": "string",
-                "description": "Element ID from the latest browser snapshot.",
+                "description": "Element ID from the latest browser snapshot. Optional when url is set.",
+            },
+            "url": {
+                "type": "string",
+                "description": "Direct http(s) file URL when the page serves the file immediately.",
             },
             "filename": {
                 "type": "string",
                 "description": "Optional safe output filename. The website suggestion is used by default.",
             },
+            "dest": {
+                "type": "string",
+                "description": "Optional allowlisted destination file or directory under temp/.",
+            },
             "timeout_ms": {
                 "type": "integer",
-                "description": "Maximum wait in milliseconds (default: 30000, max: 120000).",
+                "description": "Maximum wait in milliseconds (default: 30000, max: 1800000).",
             },
         },
-        "required": ["element_id"],
+        "required": [],
     },
     {
         "name": "browser_type",

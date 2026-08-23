@@ -1,24 +1,35 @@
 # Changelog
 
-## 1.0.13 - 2026-07-26 (Draft)
+## 1.0.13 - 2026-08-23
 ### Added
-- Safe `edit_file`, `verify_files`, and optional provider diagnostics for
-  bounded coding workflows with stale-edit protection.
-- Copy-on-write subagent workspaces with bounded structured diffs and explicit
-  parent-side change application.
-- Animated pet companions for the web dashboard and browser extension,
-  including pet selection, preferences, and activity-aware animation states.
-- The `hatch-pet` skill for creating, validating, and packaging animated pets.
+- Durable SQLite job queue with persist-before-run, leases, heartbeats, and
+  crash resume. Interrupted jobs are re-queued on boot instead of fail-closed.
+- Companion/web/Discord chats persist as durable jobs before the agent runs and
+  resume after `kill -9` instead of 404ing.
+- `limebot setup` first-run helper and `--recommended` browser + Chromium install.
+- `vm-lab` skill: allowlisted ISO download, QEMU/KVM create/start, wait-ssh, ssh.
+  `wait-ssh` requires an `SSH-` banner (QEMU slirp can accept TCP first).
+  Cloud images boot the disk with a nocloud seed; KVM with an empty serial
+  log falls back to TCG.
+- Honest cron completion: `last_status=ok` only after the agent turn finishes.
+- Unattended allowlists for scheduled/queued jobs. Live chat stays gated.
+- Cursor plugin package format and `limebot plugin install` (official schemas
+  under `schemas/cursor-plugin/`).
+- systemd unit files under `deploy/systemd/` for 24/7 supervision.
 
 ### Changed
-- Agent prompts, tool routing, confirmation metadata, and workspace context
-  now expose coding phases, read-only status, and subagent isolation details.
-- Chat and task-progress surfaces now use the selected pet as the assistant
-  visual and reflect connection, approval, activity, and error states.
+- Telegram is documented as a working long-poller, not a scaffold.
+- Fast-harness casual-turn tool suppression does not apply to scheduled jobs.
+- `edit_file` treats an already-correct file as `already_applied` after resume.
+- Isolated explorer/reviewer sub-agents inherit parent allowlists for reads.
+- Missing Playwright returns one setup command instead of a silent search-only path.
+- Unsupported Node/Python prints a plain-language next step, not a stack trace.
+- `browser_download` can follow a direct URL and wait up to 30 minutes for large files.
 
-### Fixed
-- Coding and review subagents no longer implicitly mutate the live workspace
-  when running with automatic isolation.
+### Removed
+- Showcase Jennie / hatch-pet authoring and the Pets dashboard.
+- Built-in `github` skill (replaced by the official Cursor GitHub plugin).
+- Unused `browser-harness` skill (not LimeBot's Playwright browser runtime).
 
 ## 1.0.12 - 2026-07-09
 ### Added

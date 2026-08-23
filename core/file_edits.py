@@ -20,6 +20,23 @@ class EditValidationError(ValueError):
     """Raised when an edit cannot be applied without guessing."""
 
 
+def intended_edits_already_present(content: str, edits: Any) -> bool:
+    """True when every requested new_text is already in *content*."""
+    if not isinstance(content, str) or not isinstance(edits, list) or not edits:
+        return False
+    found = False
+    for raw in edits:
+        if not isinstance(raw, Mapping):
+            return False
+        new_text = raw.get("new_text")
+        if not isinstance(new_text, str) or not new_text:
+            return False
+        if new_text not in content:
+            return False
+        found = True
+    return found
+
+
 @dataclass(frozen=True)
 class _Replacement:
     start: int
@@ -117,6 +134,11 @@ def apply_text_edits(original: str, edits: Any) -> Tuple[str, int]:
             cursor = position + len(old_text)
 
         if not positions:
+            new_text = edit["new_text"]
+            if new_text and new_text in original:
+                # The intended end state is already on disk (common after a
+                # crash resume or a previous successful write_file).
+                continue
             raise EditValidationError(
                 f"Edit #{edit_index} could not find its exact 'old_text'; "
                 "re-read the file and retry."
@@ -163,6 +185,8 @@ def apply_text_edits(original: str, edits: Any) -> Tuple[str, int]:
             + replacement.new_text
             + updated[replacement.end :]
         )
+    if not replacements:
+        return original, 0
     if updated == original:
         raise EditValidationError("The requested edits produce no file change.")
     return updated, len(replacements)

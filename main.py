@@ -184,9 +184,13 @@ async def main():
     config = load_config()
     logger.info("Starting LimeBot...")
 
+    from core.job_queue import get_job_queue
+    from core.runtime_paths import get_data_dir
+
     bus = MessageBus()
     session_manager = SessionManager()
-    scheduler = CronManager(bus)
+    job_queue = get_job_queue(get_data_dir() / "jobs.sqlite")
+    scheduler = CronManager(bus, job_queue=job_queue)
 
     channels = []
 
@@ -286,8 +290,21 @@ async def main():
 
     tasks = []
 
+    async def _recover_durable_jobs():
+        recovered = job_queue.recover_interrupted()
+        ready = job_queue.list_ready()
+        for job in ready:
+            await bus.publish_inbound(job.to_message())
+        if recovered or ready:
+            logger.info(
+                "Durable queue recovered %s interrupted job(s) and re-queued %s ready job(s).",
+                len(recovered),
+                len(ready),
+            )
+
     tasks.append(asyncio.create_task(scheduler.run()))
     tasks.append(asyncio.create_task(bus.dispatch_outbound()))
+    tasks.append(asyncio.create_task(_recover_durable_jobs()))
     tasks.append(asyncio.create_task(agent.run()))
     tasks.append(asyncio.create_task(_run_boot_hook(bus, channels, config.llm.model)))
 

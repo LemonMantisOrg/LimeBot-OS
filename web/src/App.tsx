@@ -20,8 +20,6 @@ import { Toaster } from "@/components/ui/sonner";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useTheme, applyThemeWithSchedule } from "@/hooks/useTheme";
 import { useIdentity } from "@/hooks/useIdentity";
-import { usePetPreferences } from "@/hooks/usePetPreferences";
-import { derivePetState } from "@/lib/pet";
 import {
   INITIAL_AGENT_READINESS,
   normalizeAgentReadiness,
@@ -85,11 +83,6 @@ const PersonaPage = lazy(() =>
     default: module.PersonaPage,
   }))
 );
-const PetsPage = lazy(() =>
-  import("@/components/pets/PetsPage").then((module) => ({
-    default: module.PetsPage,
-  }))
-);
 const CronPage = lazy(() =>
   import("@/components/cron/CronPage").then((module) => ({
     default: module.CronPage,
@@ -136,7 +129,6 @@ const VIEW_META: Record<string, { title: string; description: string }> = {
   mcp: { title: "MCP", description: "External Model Context Protocol servers." },
   voice: { title: "ElevenLabs Voice", description: "List custom voices, customize TTS parameters, and test audio previews." },
   persona: { title: "Persona", description: "Identity, style, and adaptive behavior." },
-  pets: { title: "Pets", description: "Choose and control LimeBot's animated companion." },
   appearance: { title: "Appearance", description: "Themes, wallpaper, and visual settings." },
   config: { title: "Configuration", description: "Model, environment, and browser settings." },
 };
@@ -162,7 +154,6 @@ function App() {
   const setupKickoffSessionRef = useRef<string | null>(null);
 
   const { botIdentity, setBotIdentity, refreshIdentity, lastExplicitFetch } = useIdentity();
-  const { enabled: petEnabled, preferAnimatedPet, selectedPet } = usePetPreferences();
   const { handleThemeChange, handleTimeThemeSettingsChange } = useTheme();
 
   const {
@@ -191,12 +182,6 @@ function App() {
         message.toolExecution?.status === 'pending_confirmation'
       )
   ).length;
-  const petState = derivePetState({
-    isConnected,
-    isTyping,
-    pendingApprovals,
-    messages,
-  });
   const currentViewMeta = VIEW_META[currentView] || VIEW_META.chat;
   const shellRuntimeStatus: ShellRuntimeStatus = {
     isConnected,
@@ -404,10 +389,6 @@ function App() {
       onNavigate={setCurrentView}
       pageTitle={currentViewMeta.title}
       pageDescription={currentViewMeta.description}
-      petState={petState}
-      petEnabled={petEnabled}
-      preferAnimatedPet={preferAnimatedPet}
-      petManifest={selectedPet}
       runtimeStatus={shellRuntimeStatus}
     >
       <AuthKeyModal
@@ -460,8 +441,6 @@ function App() {
             <BrowserSessionsPanel />
           ) : currentView === 'persona' ? (
             <PersonaPage onNavigate={setCurrentView} />
-          ) : currentView === 'pets' ? (
-            <PetsPage onNavigate={setCurrentView} />
           ) : currentView === 'appearance' ? (
             <AppearancePage
               onThemeChange={handleThemeChange}
@@ -480,10 +459,6 @@ function App() {
               isConnected={isConnected}
               isTyping={isTyping}
               botIdentity={botIdentity}
-              petState={petState}
-              petEnabled={petEnabled}
-              preferAnimatedPet={preferAnimatedPet}
-              petManifest={selectedPet}
               activeChatId={sessionId}
               activityText={activity?.text || null}
               agentReadiness={agentReadiness}

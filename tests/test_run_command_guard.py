@@ -20,7 +20,7 @@ async def test_run_command_rejects_the_limebot_service_entrypoint():
     )
 
     assert "long-running backend" in result
-    assert "skills/github/main.py" in result
+    assert "skill entrypoint" in result
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,34 @@ LimeBot is not a wrapper around an API. It's a full agentic system  event-driven
 
 ---
 
+## Start here (one command)
+
+You need two apps on the computer: **Node.js 22.19 or newer** and **Python 3.11–3.14**. If either one is missing or too old, LimeBot will say so in plain language and tell you which installer to download. It will not dump a stack trace.
+
+```bash
+npm start
+```
+
+That is the whole first run. LimeBot installs what it needs, then opens the dashboard. In the wizard, pick a model and paste your API key. To also get a real browser (click, type, download files) in one step:
+
+```bash
+npm run lime-bot setup -- --recommended
+npm start
+```
+
+If you do not use Git: download the project ZIP from [the GitHub page](https://github.com/Ethereal-Lemons/LimeBot-OS) (Code → Download ZIP), unzip it, install [Docker Desktop](https://www.docker.com/products/docker-desktop/), then in that folder run:
+
+```bash
+sh docker/prepare.sh
+docker compose up --build -d
+```
+
+On Windows PowerShell use `powershell -ExecutionPolicy Bypass -File docker/prepare.ps1` instead of the `sh` line. Then open [http://localhost:3000](http://localhost:3000).
+
+Details, optional extras, and developer commands are further down.
+
+---
+
 ## 🏛️ How It Works (Architecture Overview)
 
 LimeBot operates on an **event-driven agentic loop**. When you send a message, it flows through the system as follows:
@@ -126,7 +154,7 @@ LimeBot is a fully-featured MCP client:
 | **Web Dashboard** | React + Vite UI connecting over WebSocket. Streams tokens as they arrive, shows live tool execution cards, confirmation prompts, thinking traces, and ghost activity indicators. **Includes a Custom CSS editor for global UI personalization.** |
 | **Discord** | Full `discord.py` integration. Responds to DMs and `@mentions`. Configurable allow-list by user ID and channel ID. Custom presence status, activity type, and display name. |
 | **WhatsApp** | Connects to a local `whatsapp-web.js` bridge over WebSocket. Contact approval whitelist with pending/blocked states. QR code displayed in the web dashboard for easy pairing. |
-| **Telegram** | Bot API long-polling scaffold. Supports text send/receive, per-user allow-listing, optional per-chat allow-listing, and startup wiring for future expansion. |
+| **Telegram** | Bot API long-polling. Supports text send/receive, per-user allow-listing, optional per-chat allow-listing, typing indicators, and 4096-character chunking. |
 
 ### 🧩 Browser Companion Extension
 
@@ -174,10 +202,19 @@ Skills extend what LimeBot can do. Each skill is a folder with a `SKILL.md` (the
 |-------|-------------|
 | `browser` | Full Playwright web browsing  navigate, click, type, search, extract |
 | `download_image` | Download high-res images from Pinterest, Reddit, Wikimedia, or direct URLs |
-| `filesystem` | Extended file operations beyond the core toolbox |
+| `filesystem` | Strategy guide for LimeBot's sandboxed file tools |
 | `discord` | Optional higher-level Discord administration helpers |
 | `docx-creator` | Create, inspect, edit, and validate Microsoft Word `.docx` documents |
-| `hatch-pet` | Create, validate, QA, and install v2 animated pets for the dashboard and browser companion |
+| `scrapling` | Stealthy page extraction when the browser skill is not enough |
+| `watch` | How to use the native `analyze_video` tool |
+
+GitHub work is no longer a built-in LimeBot skill. Install the official Cursor plugin instead:
+
+```bash
+limebot plugin install cursor/plugins/github
+# or from this repo's fixture / a local checkout:
+limebot plugin install ./path/to/third_party/github
+```
 
 **Install community skills from GitHub:**
 ```bash
@@ -204,67 +241,66 @@ python -m core.skill_installer disable <skill_name>
 
 Skills can also be managed from the **Skills** tab in the web dashboard.
 
+### Cursor plugins
+
+LimeBot understands the Cursor plugin package format (`.cursor-plugin/plugin.json`,
+optional `marketplace.json`, `skills/*/SKILL.md`, `mcp.json`, and rules).
+
+```bash
+limebot plugin install cursor/plugins/create-plugin
+limebot plugin install ./tests/fixtures/cursor-plugins/github
+limebot plugin list
+```
+
+Installed plugins land under `$LIMEBOT_STATE_DIR/plugins`. Their skills are
+loaded by the existing skill registry; their MCP servers are merged into
+`mcp/mcp_config.json`.
+
 ---
 
 ## 🚀 Getting Started
 
+The short path is at the top of this file. This section is the same flow with
+more detail.
+
 ### Before you start
 
-You need:
+Install these two apps if you do not already have them:
 
-- Windows 10+, macOS 11+, or Linux (Ubuntu 20.04+)
-- Node.js 22.19 or newer
-- Python 3.11 through 3.14
-- About 1 GB free for core LimeBot; optional browser and channel features need more
-- An API key for at least one supported LLM provider
+- [Node.js](https://nodejs.org) 22.19 or newer (the website calls this the LTS installer)
+- [Python](https://www.python.org/downloads/) 3.11 through 3.14 (on Windows, tick "Add python.exe to PATH")
 
-Check the two required runtimes before cloning:
+You also need about 1 GB free and an API key from any supported model provider.
+You do **not** need to create a virtual environment or run `npm install` yourself.
 
-```bash
-node --version
-python --version
-```
-
-On Windows, `py --version` is also accepted. You do **not** need to create a
-virtual environment or run `npm install` yourself.
+If `npm start` says Node or Python is wrong, follow the numbered steps it prints.
+Close the terminal, open a new one, and try `npm start` again.
 
 ### Quick Start
 
-1. Clone LimeBot and enter the project:
+1. Open a terminal in the LimeBot folder (clone with Git, or unzip the GitHub download).
+
+2. Optional but recommended — install a real browser so LimeBot can click and download files:
 
    ```bash
-   git clone https://github.com/Ethereal-Lemons/LimeBot-OS.git
-   cd LimeBot-OS
+   npm run lime-bot setup -- --recommended
    ```
 
-2. Start LimeBot:
+3. Start LimeBot:
 
    ```bash
    npm start
    ```
 
-   The first run automatically:
+   The first run creates `.venv`, installs core dependencies, and opens the dashboard.
 
-   - creates and validates LimeBot's `.venv`;
-   - installs only the core Python and root/web Node dependencies;
-   - starts the dashboard as soon as the backend is live; and
-   - continues loading agent capabilities in the background.
+4. Open [http://localhost:5173](http://localhost:5173) if it does not open itself.
 
-   npm and Python installation run concurrently when both are needed. LimeBot
-   records successful installs, so later starts skip unchanged dependencies.
+5. In the setup wizard, choose a model and paste its key. Keys stay in the local `.env` file.
 
-3. Open [http://localhost:5173](http://localhost:5173) if the dashboard does
-   not open automatically.
+6. Send a first message. LimeBot will ask a few persona questions and write `SOUL.md` and `IDENTITY.md`.
 
-4. Complete the setup wizard. Choose a model/provider, enter its credential,
-   and let LimeBot perform the connection check. Provider credentials stay in
-   the local `.env` file and are not stored in browser session storage.
-
-5. Send your first message. LimeBot will guide you through the short persona
-   interview and create its local `SOUL.md` and `IDENTITY.md` files.
-
-After one successful normal start, use `npm run start:quick` for the shortest
-warm-start path. Quick mode intentionally skips dependency and update checks.
+After one successful start, `npm run start:quick` is the fastest warm start.
 
 ### What gets installed
 
@@ -407,6 +443,8 @@ cd web && npm install && npm run dev
 
 ### Docker
 
+**I don't use Git.** Install [Docker Desktop](https://www.docker.com/products/docker-desktop/). On the [LimeBot GitHub page](https://github.com/Ethereal-Lemons/LimeBot-OS) click **Code → Download ZIP**, unzip it, and open a terminal in that folder. Then run the two commands below. Open [http://localhost:3000](http://localhost:3000) when Docker says the stack is up.
+
 Prepare the ignored runtime files once, then build the core stack:
 
 ```bash
@@ -447,6 +485,30 @@ docker compose ps
 docker compose logs -f backend
 docker compose down
 ```
+
+### 24/7 deploy
+
+Durable jobs are written to `data/jobs.sqlite` before the agent runs. A crash
+re-queues interrupted work; cron is marked `ok` only after the agent turn
+finishes. Live chat stays confirmation-gated. Scheduled/queued jobs use:
+
+```env
+UNATTENDED_PATH_ALLOWLIST=./persona,./temp,./logs
+UNATTENDED_COMMAND_ALLOWLIST=python,gh
+```
+
+Supervise the process so recovery can actually happen:
+
+```bash
+# Linux host
+limebot autorun enable
+# or install deploy/systemd/limebot.service and point WorkingDirectory at your checkout
+
+# Heartbeat
+curl -fsS http://127.0.0.1:8000/api/live
+```
+
+Docker already uses `restart: unless-stopped`. See [deploy/systemd/README.md](deploy/systemd/README.md).
 
 The backend port is intentionally not published. Do not publish it while
 `LIMEBOT_TRUSTED_PROXY_ONLY=true` unless `APP_API_KEY` is also configured.
@@ -519,7 +581,9 @@ prevent accidental actions; they do not change provider generation speed.
 - **Sandboxed Filesystem**  LimeBot can only read/write files in directories you explicitly whitelist.
 - **Human-in-the-loop**  sensitive actions (running shell commands, modifying/deleting files) require your explicit approval.
   > [!IMPORTANT]
-  > By default, dangerous actions will pause and wait for you to click "Approve" on the Web Dashboard. You can optionally bypass this security gate by enabling **Autonomous Mode** (via `AUTONOMOUS_MODE=true` in settings).
+  > By default, dangerous actions in live chat pause for dashboard approval.
+  > Scheduled and queued jobs use `UNATTENDED_PATH_ALLOWLIST` /
+  > `UNATTENDED_COMMAND_ALLOWLIST` instead of forcing `AUTONOMOUS_MODE=true`.
 - **Open Source**  audit the code yourself. No hidden telemetry.
 
 ---

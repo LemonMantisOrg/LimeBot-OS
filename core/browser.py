@@ -30,6 +30,16 @@ except ImportError:
     Page = Any
     logger.warning("Playwright not installed. Browser features will be disabled.")
 
+BROWSER_INSTALL_HINT = (
+    "The real browser is not installed yet. One step from the LimeBot folder: "
+    "npm run lime-bot setup -- --recommended"
+    " (or: npm run lime-bot feature install browser && npm run install-browser)."
+)
+
+
+def browser_unavailable_message() -> str:
+    return BROWSER_INSTALL_HINT
+
 
 _VALID_BROWSER_MODES = frozenset({"isolated", "shared", "system", "attach"})
 
@@ -360,8 +370,44 @@ class BrowserManager:
         self._using_system_snapshot = True
         return snapshot_dir
 
+    def _resolve_download_dest(self, filename: str = "", dest: str = "") -> Path:
+        """Keep downloads inside temp/ or an explicit allowlisted dest."""
+        requested_name = Path(str(filename or "")).name
+        raw_dest = str(dest or "").strip()
+        if raw_dest:
+            target = Path(raw_dest).expanduser()
+            if not target.is_absolute():
+                target = (Path.cwd() / target).resolve()
+            else:
+                target = target.resolve()
+            if target.suffix or requested_name:
+                if target.exists() and target.is_dir():
+                    target = target / (requested_name or f"download_{int(time.time())}")
+            else:
+                target = target / (requested_name or f"download_{int(time.time())}")
+        else:
+            safe_name = requested_name or f"download_{int(time.time())}"
+            target = (self.downloads_dir / safe_name).resolve()
+
+        roots = [
+            self.DOWNLOADS_DIR.resolve(),
+            Path(self.downloads_dir).resolve(),
+            (Path.cwd() / "temp").resolve(),
+        ]
+        state_dir = str(os.environ.get("LIMEBOT_STATE_DIR") or "").strip()
+        if state_dir:
+            roots.append(Path(state_dir).resolve())
+        if not any(target == root or root in target.parents for root in roots):
+            raise ValueError(
+                f"Download dest must stay under temp/ or LIMEBOT_STATE_DIR: {target}"
+            )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        return target
+
     async def _ensure_browser(self) -> Page:
         """Ensure browser is running and return the active page."""
+        if async_playwright is None:
+            raise RuntimeError(BROWSER_INSTALL_HINT)
         async with self._browser_lock:
             if self._browser is not None and not self._has_live_browser_connection():
                 logger.warning("Browser connection was lost. Reconnecting...")
@@ -985,30 +1031,45 @@ class BrowserManager:
 
     async def download(
         self,
-        element_id: str,
+        element_id: str = "",
         filename: str = "",
         timeout_ms: int = 30_000,
+        dest: str = "",
+        url: str = "",
     ) -> Dict[str, Any]:
-        """Click a known element, wait for its download, and save it locally."""
+        """Click a known element or open a direct URL, then save the download."""
         async with self._action_lock:
-            if element_id not in self._element_map:
+            direct_url = str(url or "").strip()
+            element = str(element_id or "").strip()
+            if not direct_url and element not in self._element_map:
                 return {
                     "success": False,
-                    "error": f"Element '{element_id}' not found. Run snapshot first.",
+                    "error": (
+                        f"Element '{element_id}' not found. Run snapshot first, "
+                        "or pass url= for a direct file link."
+                    ),
                 }
 
             try:
-                timeout_ms = max(1_000, min(int(timeout_ms or 30_000), 120_000))
-                locator = self._element_map[element_id]
-                try:
-                    await locator.scroll_into_view_if_needed(timeout=2_000)
-                except Exception:
-                    pass
-
+                # Large ISOs and installers need minutes, not 30 seconds.
+                timeout_ms = max(1_000, min(int(timeout_ms or 30_000), 1_800_000))
                 page = await self._ensure_browser()
                 async with page.expect_download(timeout=timeout_ms) as pending:
-                    await locator.click()
-                download = await pending.value
+                    if direct_url and not element:
+                        try:
+                            await page.goto(direct_url, wait_until="commit")
+                        except Exception as nav_exc:
+                            # Direct file URLs abort navigation when the download starts.
+                            if "Download is starting" not in str(nav_exc):
+                                raise
+                    else:
+                        locator = self._element_map[element]
+                        try:
+                            await locator.scroll_into_view_if_needed(timeout=2_000)
+                        except Exception:
+                            pass
+                        await locator.click()
+                    download = await pending.value
 
                 failure = await download.failure()
                 if failure:
@@ -1021,7 +1082,7 @@ class BrowserManager:
                 if not safe_name:
                     safe_name = f"download_{int(time.time())}"
 
-                destination = self.downloads_dir / safe_name
+                destination = self._resolve_download_dest(safe_name, dest)
                 if destination.exists():
                     destination = destination.with_name(
                         f"{destination.stem}_{int(time.time())}{destination.suffix}"
@@ -1034,6 +1095,7 @@ class BrowserManager:
                     "path": str(destination.resolve()),
                     "suggested_filename": suggested_name,
                     "url": download.url,
+                    "bytes": destination.stat().st_size if destination.exists() else 0,
                 }
             except Exception as e:
                 logger.error(f"Download failed: {e}")

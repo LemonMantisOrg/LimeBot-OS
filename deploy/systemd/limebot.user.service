@@ -1,0 +1,15 @@
+[Unit]
+Description=LimeBot 24/7 assistant (user session)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/LimeBot-OS
+ExecStart=%h/LimeBot-OS/bin/gateway.sh
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

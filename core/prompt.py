@@ -547,7 +547,7 @@ def get_setup_prompt(soul_content: str = "", identity_content: str = "") -> str:
         f"{existing_context}\n"
         f"--- INTERVIEW RULES (STRICT) ---\n"
         f"Your job is to get the setup done FAST. One short message, one reply from the user, done.\n\n"
-        f"QUICK-START BYPASS: If the user's message ALREADY contains persona details (e.g. 'You are Jennie, my dev copilot' "
+        f"QUICK-START BYPASS: If the user's message ALREADY contains persona details (e.g. 'You are LimeBot, my dev copilot' "
         f"or 'I'm Leo, make yourself a sarcastic coder named ByteBot'), skip the interview ENTIRELY. "
         f"Extract what they gave you, infer the rest, and immediately emit all save tags. Do NOT ask follow-up questions.\n\n"
         f"IF YOU MUST ASK (no persona info in the user's message yet):\n"

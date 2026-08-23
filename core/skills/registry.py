@@ -269,7 +269,7 @@ class SkillRegistry:
             "discord": {"discord", "guild", "channel", "server", "embed"},
             "download_image": {"image", "photo", "wallpaper", "download"},
             "filesystem": {"file", "folder", "directory", "path", "read", "write"},
-            "github": {"github", "repo", "repository", "pull", "pr", "branch"},
+            "create-plugin-scaffold": {"plugin", "manifest", "marketplace"},
             "jira": {"jira", "ticket", "issue", "attachment", "attachments"},
             "scrapling": {"scrape", "scraping", "selector", "html", "extract"},
             "whatsapp": {"whatsapp", "jid", "media", "send"},

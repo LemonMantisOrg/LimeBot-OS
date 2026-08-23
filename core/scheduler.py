@@ -30,9 +30,15 @@ _job_last_fired: dict[str, float] = {}
 class CronManager:
     """Manages scheduled tasks and reminders."""
 
-    def __init__(self, bus: Any, session_manager: Any | None = None):
+    def __init__(
+        self,
+        bus: Any,
+        session_manager: Any | None = None,
+        job_queue: Any | None = None,
+    ):
         self.bus = bus
         self.session_manager = session_manager
+        self.job_queue = job_queue
         self.jobs: List[Dict[str, Any]] = []
         self.job_state: Dict[str, Dict[str, Any]] = {}
         self._running = False
@@ -462,48 +468,59 @@ class CronManager:
         )
 
         context = job.get("context", {})
+        metadata = {
+            "is_scheduler": True,
+            "original_job_id": job["id"],
+            "scheduled_trigger": scheduled_trigger,
+            "reply_to": context.get("sender_id", "unknown"),
+            "unattended": True,
+            "durable": True,
+            "tracker_task_id": _task_id,
+        }
         msg = InboundMessage(
             channel=context.get("channel", "unknown"),
             sender_id=context.get("sender_id", "unknown"),
             chat_id=context.get("chat_id", "unknown"),
             content=f"[SCHEDULER] {job['payload']}",
-            metadata={
-                "is_scheduler": True,
-                "original_job_id": job["id"],
-                "scheduled_trigger": scheduled_trigger,
-                "reply_to": context.get("sender_id", "unknown"),
-            },
+            metadata=metadata,
         )
         try:
+            queue = getattr(self, "job_queue", None)
+            if queue is not None:
+                durable = queue.enqueue(
+                    msg,
+                    kind="cron",
+                    cron_job_id=job_id,
+                )
+                metadata["durable_job_id"] = durable.id
+                msg.metadata = metadata
             await self.bus.publish_inbound(msg)
             duration_ms = int((time.time() - started_at) * 1000)
-            prior = getattr(self, "job_state", {}).get(job_id, {})
-            state = self._update_job_state(
+            self._update_job_state(
                 job_id,
                 last_run_at=started_at,
                 lastRunAtMs=int(started_at * 1000),
                 last_scheduled_trigger=scheduled_trigger,
                 lastScheduledTriggerMs=int(scheduled_trigger * 1000) if scheduled_trigger else None,
-                last_status="ok",
-                lastStatus="ok",
-                last_run_status="ok",
-                lastRunStatus="ok",
+                last_status="running",
+                lastStatus="running",
+                last_run_status="running",
+                lastRunStatus="running",
                 last_duration_ms=duration_ms,
                 lastDurationMs=duration_ms,
                 next_trigger=next_trigger,
                 next_run_at=next_trigger,
                 nextRunAtMs=int(next_trigger * 1000) if next_trigger else None,
-                consecutive_errors=0,
-                consecutiveErrors=0,
+                enqueued_at=time.time(),
             )
             await asyncio.to_thread(self._save_state)
             await asyncio.to_thread(
                 self._append_run_event,
                 job_id,
                 {
-                    "type": "job_finished",
-                    "action": "finished",
-                    "status": "ok",
+                    "type": "job_enqueued",
+                    "action": "enqueued",
+                    "status": "running",
                     "payload": job["payload"],
                     "channel": context.get("channel", "unknown"),
                     "chat_id": context.get("chat_id", "unknown"),
@@ -511,11 +528,9 @@ class CronManager:
                     "scheduledRunAtMs": int(scheduled_trigger * 1000) if scheduled_trigger else None,
                     "durationMs": duration_ms,
                     "nextRunAtMs": int(next_trigger * 1000) if next_trigger else None,
-                    "previousStatus": prior.get("last_status") or prior.get("lastStatus"),
-                    "state": state,
+                    "durable_job_id": metadata.get("durable_job_id"),
                 },
             )
-            await tracker.complete_task(_task_id)
         except Exception as e:
             duration_ms = int((time.time() - started_at) * 1000)
             prior_errors = int(
@@ -564,3 +579,52 @@ class CronManager:
                 },
             )
             await tracker.complete_task(_task_id, error=str(e))
+
+    async def mark_run_finished(
+        self,
+        job_id: str,
+        *,
+        status: str = "ok",
+        error: Optional[str] = None,
+        tracker_task_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Record cron completion only after the agent turn finishes."""
+        now = time.time()
+        prior = getattr(self, "job_state", {}).get(job_id, {})
+        started_at = float(prior.get("last_run_at") or now)
+        duration_ms = int((now - started_at) * 1000)
+        normalized = "ok" if status in {"ok", "succeeded", "completed"} else "error"
+        state = self._update_job_state(
+            job_id,
+            last_status=normalized,
+            lastStatus=normalized,
+            last_run_status=normalized,
+            lastRunStatus=normalized,
+            last_error=error,
+            lastError=error,
+            last_duration_ms=duration_ms,
+            lastDurationMs=duration_ms,
+            consecutive_errors=0 if normalized == "ok" else int(prior.get("consecutive_errors") or 0) + 1,
+            consecutiveErrors=0 if normalized == "ok" else int(prior.get("consecutiveErrors") or 0) + 1,
+        )
+        await asyncio.to_thread(self._save_state)
+        await asyncio.to_thread(
+            self._append_run_event,
+            job_id,
+            {
+                "type": "job_finished" if normalized == "ok" else "job_error",
+                "action": "finished",
+                "status": normalized,
+                "error": error,
+                "durationMs": duration_ms,
+                "previousStatus": prior.get("last_status") or prior.get("lastStatus"),
+                "state": state,
+            },
+        )
+        if tracker_task_id:
+            from core.task_tracker import get_task_tracker
+
+            await get_task_tracker().complete_task(
+                tracker_task_id, error=error if normalized != "ok" else None
+            )
+        return state
