@@ -8,6 +8,9 @@
   resume after `kill -9` instead of 404ing.
 - `limebot setup` first-run helper and `--recommended` browser + Chromium install.
 - `vm-lab` skill: allowlisted ISO download, QEMU/KVM create/start, wait-ssh, ssh.
+  `wait-ssh` requires an `SSH-` banner (QEMU slirp can accept TCP first).
+  Cloud images boot the disk with a nocloud seed; KVM with an empty serial
+  log falls back to TCG.
 - Honest cron completion: `last_status=ok` only after the agent turn finishes.
 - Unattended allowlists for scheduled/queued jobs. Live chat stays gated.
 - Cursor plugin package format and `limebot plugin install` (official schemas

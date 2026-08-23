@@ -125,6 +125,88 @@ def _state_file(name: str) -> Path:
     return _require_allowed(path)
 
 
+def _write_cloud_seed(
+    name: str,
+    *,
+    user: str,
+    pubkey: str,
+    extra_user_data: str = "",
+) -> Path:
+    """Write nocloud user-data/meta-data and a cidata ISO."""
+    workspace = _require_allowed(DEFAULT_WORKSPACE)
+    workspace.mkdir(parents=True, exist_ok=True)
+    user_data = (
+        "#cloud-config\n"
+        "package_update: false\n"
+        "ssh_pwauth: true\n"
+        "disable_root: false\n"
+        "users:\n"
+        f"  - name: {user}\n"
+        "    sudo: ALL=(ALL) NOPASSWD:ALL\n"
+        "    lock_passwd: false\n"
+        "    shell: /bin/sh\n"
+        "    ssh_authorized_keys:\n"
+        f"      - {pubkey.strip()}\n"
+        "chpasswd:\n"
+        "  expire: false\n"
+        f"  list: |\n"
+        f"    {user}:labpass\n"
+        "runcmd:\n"
+        "  - [ sh, -c, 'rc-update add sshd default 2>/dev/null || true' ]\n"
+        "  - [ sh, -c, 'rc-service sshd start 2>/dev/null || systemctl start ssh || systemctl start sshd || true' ]\n"
+    )
+    if extra_user_data:
+        user_data += extra_user_data.rstrip() + "\n"
+    meta = f"instance-id: limebot-{name}\nlocal-hostname: {name}\n"
+    cidata = _require_allowed(workspace / f"{name}-cidata")
+    cidata.mkdir(parents=True, exist_ok=True)
+    user_path = cidata / "user-data"
+    meta_path = cidata / "meta-data"
+    user_path.write_text(user_data, encoding="utf-8")
+    meta_path.write_text(meta, encoding="utf-8")
+    seed = _require_allowed(workspace / f"{name}-seed.iso")
+    maker = shutil.which("genisoimage") or shutil.which("mkisofs") or shutil.which("xorriso")
+    if not maker:
+        raise SystemExit("error: genisoimage/mkisofs is required to build a cloud-init seed")
+    # Files must be named user-data/meta-data inside the ISO. 8.3 Joliet
+    # names (USER_DAT) are ignored by cloud-init.
+    cmd = [
+        maker,
+        "-output",
+        str(seed),
+        "-volid",
+        "cidata",
+        "-rational-rock",
+        "-J",
+        "-input-charset",
+        "utf-8",
+        "-graft-points",
+        f"user-data={user_path}",
+        f"meta-data={meta_path}",
+    ]
+    if Path(maker).name == "xorriso":
+        cmd = [
+            maker,
+            "-as",
+            "mkisofs",
+            "-output",
+            str(seed),
+            "-volid",
+            "cidata",
+            "-rational-rock",
+            "-J",
+            "-graft-points",
+            f"user-data={user_path}",
+            f"meta-data={meta_path}",
+        ]
+    completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if completed.returncode != 0:
+        raise SystemExit(
+            f"error: seed iso failed: {(completed.stderr or completed.stdout).strip()}"
+        )
+    return seed
+
+
 def cmd_create(args: argparse.Namespace) -> Dict[str, Any]:
     detect = cmd_detect(args)
     if not detect.get("qemu"):
@@ -143,13 +225,30 @@ def cmd_create(args: argparse.Namespace) -> Dict[str, Any]:
         )
         if completed.returncode != 0:
             raise SystemExit(f"error: qemu-img failed: {completed.stderr.strip()}")
+    seed = _require_allowed(Path(args.seed)) if getattr(args, "seed", None) else None
+    pubkey = str(getattr(args, "ssh_pubkey", "") or "").strip()
+    pubkey_file = str(getattr(args, "ssh_pubkey_file", "") or "").strip()
+    if pubkey_file:
+        pubkey = _require_allowed(Path(pubkey_file)).read_text(encoding="utf-8").strip()
+    if pubkey and seed is None:
+        seed = _write_cloud_seed(
+            args.name,
+            user=str(getattr(args, "cloud_user", None) or "alpine"),
+            pubkey=pubkey,
+        )
+    if seed is not None:
+        seed = _require_allowed(seed)
     state = {
         "name": args.name,
         "iso": str(iso) if iso else "",
         "disk": str(disk),
+        "seed": str(seed) if seed else "",
+        "install": bool(getattr(args, "install", False)),
         "memory_mb": int(args.memory_mb or 1024),
         "ssh_port": int(args.ssh_port or 2222),
-        "accel": detect["accel"],
+        "ssh_user": str(getattr(args, "cloud_user", None) or "alpine"),
+        "ssh_identity": str(getattr(args, "ssh_identity", "") or ""),
+        "accel": str(getattr(args, "accel", None) or detect["accel"]),
         "pid": None,
     }
     path = _state_file(args.name)
@@ -165,6 +264,10 @@ def _load_state(name: str) -> Dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _save_state(name: str, state: Dict[str, Any]) -> None:
+    _state_file(name).write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
 def cmd_start(args: argparse.Namespace) -> Dict[str, Any]:
     detect = cmd_detect(args)
     qemu = detect.get("qemu")
@@ -172,40 +275,137 @@ def cmd_start(args: argparse.Namespace) -> Dict[str, Any]:
         raise SystemExit(detect.get("blocker") or "error: qemu missing")
     state = _load_state(args.name)
     disk = _require_allowed(Path(state["disk"]))
+    serial = _require_allowed(DEFAULT_WORKSPACE / f"{state['name']}-serial.log")
+    serial.parent.mkdir(parents=True, exist_ok=True)
+    serial.write_text("", encoding="utf-8")
+    pid_path = _require_allowed(DEFAULT_WORKSPACE / f"{state['name']}.pid")
+    # Do not use -daemonize: the parent can hang forever after fork (seen
+    # with -monitor none + pidfile). Background ourself and keep a pid.
+    # IDE boot is more reliable than virtio-blk on tiny cloud images.
     command = [
         qemu,
         "-name",
         str(state["name"]),
+        "-machine",
+        "pc",
+        "-accel",
+        str(state.get("accel") or ("kvm" if detect.get("kvm") else "tcg")),
+        "-cpu",
+        "qemu64",
         "-m",
         str(state.get("memory_mb") or 1024),
+        "-smp",
+        "2",
         "-drive",
-        f"file={disk},if=virtio",
+        f"file={disk},if=ide,format=qcow2,index=0,media=disk",
         "-netdev",
         f"user,id=net0,hostfwd=tcp:127.0.0.1:{state['ssh_port']}-:22",
         "-device",
         "virtio-net-pci,netdev=net0",
         "-display",
         "none",
-        "-daemonize",
-        "-pidfile",
-        str(_require_allowed(DEFAULT_WORKSPACE / f"{state['name']}.pid")),
+        "-serial",
+        f"file:{serial}",
+        "-monitor",
+        "none",
+        "-no-reboot",
     ]
-    if detect.get("kvm"):
-        command[1:1] = ["-enable-kvm"]
-    iso = str(state.get("iso") or "").strip()
-    if iso:
-        iso_path = _require_allowed(Path(iso))
-        command.extend(["-cdrom", str(iso_path), "-boot", "d"])
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
-    if completed.returncode != 0:
-        raise SystemExit(
-            f"error: qemu start failed: {(completed.stderr or completed.stdout).strip()}"
+    seed = str(state.get("seed") or "").strip()
+    if seed:
+        seed_path = _require_allowed(Path(seed))
+        command.extend(
+            [
+                "-drive",
+                f"file={seed_path},if=ide,format=raw,index=1,media=cdrom,readonly=on",
+            ]
         )
-    pid_file = DEFAULT_WORKSPACE / f"{state['name']}.pid"
-    pid = int(pid_file.read_text().strip()) if pid_file.exists() else None
-    state["pid"] = pid
-    _state_file(args.name).write_text(json.dumps(state, indent=2), encoding="utf-8")
-    return {"ok": True, "pid": pid, "ssh_port": state["ssh_port"], "accel": detect["accel"]}
+    iso = str(state.get("iso") or "").strip()
+    install = bool(state.get("install"))
+    if iso and install:
+        iso_path = _require_allowed(Path(iso))
+        command.extend(["-cdrom", str(iso_path), "-boot", "order=d"])
+    log_path = _require_allowed(DEFAULT_WORKSPACE / f"{state['name']}-qemu.log")
+    log_handle = log_path.open("w", encoding="utf-8")
+    try:
+        proc = subprocess.Popen(
+            command,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        log_handle.close()
+        raise SystemExit(f"error: qemu start failed: {exc}") from exc
+    time.sleep(0.4)
+    if proc.poll() is not None:
+        log_handle.close()
+        tail = log_path.read_text(encoding="utf-8", errors="replace")[-800:]
+        raise SystemExit(f"error: qemu exited {proc.returncode}: {tail}")
+    pid_path.write_text(str(proc.pid), encoding="utf-8")
+    # Nested KVM can accept /dev/kvm then park the vCPU at 0% with an
+    # empty serial log. Fall back to TCG so wait-ssh can still succeed.
+    if (state.get("accel") or "kvm") == "kvm":
+        deadline = time.time() + 12
+        while time.time() < deadline:
+            if serial.exists() and serial.stat().st_size > 0:
+                break
+            if proc.poll() is not None:
+                break
+            time.sleep(0.5)
+        else:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            command = [c if c != "kvm" else "tcg" for c in command]
+            proc = subprocess.Popen(
+                command,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            time.sleep(0.4)
+            if proc.poll() is not None:
+                tail = log_path.read_text(encoding="utf-8", errors="replace")[-800:]
+                raise SystemExit(f"error: qemu tcg fallback exited {proc.returncode}: {tail}")
+            pid_path.write_text(str(proc.pid), encoding="utf-8")
+            state["accel"] = "tcg"
+    state["pid"] = proc.pid
+    state["serial"] = str(serial)
+    state["qemu_command"] = command
+    _save_state(args.name, state)
+    return {
+        "ok": True,
+        "pid": proc.pid,
+        "ssh_port": state["ssh_port"],
+        "accel": state.get("accel") or detect["accel"],
+        "serial": str(serial),
+        "command": command,
+    }
+
+
+def _ssh_banner(port: int) -> str:
+    """QEMU user-net accepts TCP even when sshd is down. Require an SSH banner."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(2.5)
+    try:
+        sock.connect(("127.0.0.1", port))
+        data = sock.recv(256)
+    except OSError as exc:
+        return f"error:{exc}"
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+    text = data.decode("ascii", errors="replace") if data else ""
+    if text.startswith("SSH-"):
+        return text.strip()
+    if data:
+        return f"not-ssh:{text[:80]!r}"
+    return "tcp-open-no-banner"
 
 
 def cmd_wait_ssh(args: argparse.Namespace) -> Dict[str, Any]:
@@ -215,28 +415,32 @@ def cmd_wait_ssh(args: argparse.Namespace) -> Dict[str, Any]:
     deadline = time.time() + timeout
     last = ""
     while time.time() < deadline:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(1.5)
-        try:
-            sock.connect(("127.0.0.1", port))
-            sock.close()
-            return {"ok": True, "port": port, "ready": True}
-        except OSError as exc:
-            last = str(exc)
-            time.sleep(1)
-        finally:
-            try:
-                sock.close()
-            except OSError:
-                pass
-    raise SystemExit(f"error: ssh port {port} did not open: {last}")
+        last = _ssh_banner(port)
+        if last.startswith("SSH-"):
+            return {"ok": True, "port": port, "ready": True, "banner": last}
+        time.sleep(1)
+    serial = str(state.get("serial") or "")
+    serial_tail = ""
+    if serial and Path(serial).exists():
+        serial_tail = Path(serial).read_text(encoding="utf-8", errors="replace")[-800:]
+    raise SystemExit(
+        f"error: ssh banner on port {port} did not appear: {last}; "
+        f"serial_tail={serial_tail!r}"
+    )
 
 
 def cmd_ssh(args: argparse.Namespace) -> Dict[str, Any]:
     state = _load_state(args.name)
     port = int(state.get("ssh_port") or 22)
-    user = str(args.user or "root")
+    user = str(args.user or state.get("ssh_user") or "root")
     command = list(args.command or ["uname", "-a"])
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        command = ["uname", "-a"]
+    identity = str(
+        getattr(args, "identity", "") or state.get("ssh_identity") or ""
+    ).strip()
     ssh = [
         "ssh",
         "-o",
@@ -244,12 +448,19 @@ def cmd_ssh(args: argparse.Namespace) -> Dict[str, Any]:
         "-o",
         "UserKnownHostsFile=/dev/null",
         "-o",
-        "ConnectTimeout=8",
+        "IdentitiesOnly=yes" if identity else "IdentitiesOnly=no",
+        "-o",
+        "PreferredAuthentications=publickey,password",
+        "-o",
+        "ConnectTimeout=12",
         "-p",
         str(port),
         f"{user}@127.0.0.1",
         *command,
     ]
+    if identity:
+        ident = _require_allowed(Path(identity))
+        ssh[1:1] = ["-i", str(ident)]
     completed = subprocess.run(ssh, capture_output=True, text=True, check=False)
     return {
         "ok": completed.returncode == 0,
@@ -267,8 +478,13 @@ def cmd_stop(args: argparse.Namespace) -> Dict[str, Any]:
             os.kill(int(pid), 15)
         except OSError:
             pass
+        time.sleep(0.4)
+        try:
+            os.kill(int(pid), 9)
+        except OSError:
+            pass
     state["pid"] = None
-    _state_file(args.name).write_text(json.dumps(state, indent=2), encoding="utf-8")
+    _save_state(args.name, state)
     return {"ok": True, "stopped": True}
 
 
@@ -287,15 +503,31 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--disk-size", default="8G")
     create.add_argument("--memory-mb", type=int, default=1024)
     create.add_argument("--ssh-port", type=int, default=2222)
+    create.add_argument("--seed")
+    create.add_argument("--ssh-pubkey")
+    create.add_argument("--ssh-pubkey-file")
+    create.add_argument("--ssh-identity")
+    create.add_argument("--cloud-user", default="alpine")
+    create.add_argument(
+        "--install",
+        action="store_true",
+        help="Boot the attached ISO as an installer (default: boot the disk).",
+    )
+    create.add_argument(
+        "--accel",
+        choices=("kvm", "tcg"),
+        help="Force kvm or tcg. Default: kvm when /dev/kvm exists.",
+    )
     for name in ("start", "stop"):
         item = sub.add_parser(name)
         item.add_argument("--name", required=True)
     wait = sub.add_parser("wait-ssh")
     wait.add_argument("--name", required=True)
-    wait.add_argument("--timeout", type=int, default=60)
+    wait.add_argument("--timeout", type=int, default=180)
     ssh = sub.add_parser("ssh")
     ssh.add_argument("--name", required=True)
-    ssh.add_argument("--user", default="root")
+    ssh.add_argument("--user", default=None)
+    ssh.add_argument("--identity")
     ssh.add_argument("--command", nargs=argparse.REMAINDER, default=["uname", "-a"])
     return parser
 

@@ -61,6 +61,12 @@ class TestVmLab(unittest.TestCase):
                 disk_size="1G",
                 memory_mb=512,
                 ssh_port=2222,
+                seed=None,
+                ssh_pubkey="",
+                ssh_pubkey_file="",
+                ssh_identity="",
+                cloud_user="alpine",
+                install=False,
             )
             with patch.dict(
                 "os.environ",
@@ -91,3 +97,25 @@ class TestVmLab(unittest.TestCase):
             self.assertEqual(result["accel"], "tcg")
             state = json.loads((Path(tmp) / "vm-lab" / "alpine-smoke.json").read_text())
             self.assertEqual(state["ssh_port"], 2222)
+            self.assertFalse(state["install"])
+            self.assertEqual(state["seed"], "")
+
+    def test_wait_ssh_requires_banner_not_bare_tcp(self):
+        with TemporaryDirectory() as tmp:
+            vm_lab.DEFAULT_WORKSPACE = Path(tmp)
+            state_path = Path(tmp) / "lab.json"
+            state_path.write_text(
+                json.dumps({"name": "lab", "ssh_port": 2222, "serial": ""}),
+                encoding="utf-8",
+            )
+            with patch.object(vm_lab, "_state_file", return_value=state_path):
+                with patch.object(vm_lab, "_ssh_banner", return_value="tcp-open-no-banner"):
+                    with self.assertRaises(SystemExit) as blocked:
+                        vm_lab.cmd_wait_ssh(SimpleNamespace(name="lab", timeout=1))
+            self.assertIn("banner", str(blocked.exception))
+
+            with patch.object(vm_lab, "_state_file", return_value=state_path):
+                with patch.object(vm_lab, "_ssh_banner", return_value="SSH-2.0-OpenSSH_9.7"):
+                    result = vm_lab.cmd_wait_ssh(SimpleNamespace(name="lab", timeout=1))
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["banner"].startswith("SSH-"))
