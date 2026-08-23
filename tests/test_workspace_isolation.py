@@ -85,7 +85,8 @@ class TestWorkspaceIsolation(unittest.IsolatedAsyncioTestCase):
             )
             token = workspace.activate()
             try:
-                self.assertFalse(toolbox._is_path_allowed(str(Path.cwd() / "README.md")))
+                self.assertTrue(toolbox._is_path_allowed(str(source_file)))
+                self.assertFalse(toolbox._is_path_allowed("/etc/passwd"))
                 self.assertIn("cannot escape", toolbox.validate_command("type ..\\README.md"))
                 self.assertIn(
                     "cannot address the live project",

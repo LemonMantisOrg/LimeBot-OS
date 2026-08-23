@@ -391,6 +391,7 @@ class BrowserManager:
 
         roots = [
             self.DOWNLOADS_DIR.resolve(),
+            Path(self.downloads_dir).resolve(),
             (Path.cwd() / "temp").resolve(),
         ]
         state_dir = str(os.environ.get("LIMEBOT_STATE_DIR") or "").strip()
@@ -405,7 +406,7 @@ class BrowserManager:
 
     async def _ensure_browser(self) -> Page:
         """Ensure browser is running and return the active page."""
-        if not PLAYWRIGHT_AVAILABLE or async_playwright is None:
+        if async_playwright is None:
             raise RuntimeError(BROWSER_INSTALL_HINT)
         async with self._browser_lock:
             if self._browser is not None and not self._has_live_browser_connection():
@@ -1037,9 +1038,6 @@ class BrowserManager:
         url: str = "",
     ) -> Dict[str, Any]:
         """Click a known element or open a direct URL, then save the download."""
-        if not PLAYWRIGHT_AVAILABLE:
-            return {"success": False, "error": BROWSER_INSTALL_HINT}
-
         async with self._action_lock:
             direct_url = str(url or "").strip()
             element = str(element_id or "").strip()
