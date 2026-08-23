@@ -1119,6 +1119,7 @@ ${colors.reset}
     ${colors.cyan}update-check${colors.reset}     Check current version, latest version, and git update status
     ${colors.cyan}auth${colors.reset}             Manage CLI-only auth providers like Codex OAuth
     ${colors.cyan}skill${colors.reset}            Manage skills (install, uninstall, update, list)
+    ${colors.cyan}plugin${colors.reset}           Install Cursor plugin packages (skills + MCP)
     ${colors.cyan}doctor${colors.reset}           Diagnose common issues + run tests
     ${colors.cyan}logs${colors.reset}             Show recent logs
     ${colors.cyan}review-diff${colors.reset}      Build a redacted, review-only diff artifact
@@ -1147,6 +1148,11 @@ ${colors.reset}
     ${colors.dim}limebot skill install <repo-url> [--ref v2.0]${colors.reset}
     ${colors.dim}limebot skill uninstall <name>${colors.reset}
     ${colors.dim}limebot skill update <name>${colors.reset}
+
+  ${colors.bright}Plugin Commands:${colors.reset}
+    ${colors.dim}limebot plugin list${colors.reset}
+    ${colors.dim}limebot plugin install <local-path|cursor/plugins/github>${colors.reset}
+    ${colors.dim}limebot plugin uninstall <name>${colors.reset}
 
   ${colors.bright}Feature Commands:${colors.reset}
     ${colors.dim}limebot feature install <browser|memory|documents|mcp|video|whatsapp|extension|all>${colors.reset}
@@ -1708,6 +1714,36 @@ async function cmdSkill(args) {
     });
 }
 
+async function cmdPlugin(args) {
+    const subCommand = args[0]?.toLowerCase() || 'list';
+    const VALID_SUBCMDS = new Set(['list', 'install', 'uninstall']);
+    if (!VALID_SUBCMDS.has(subCommand)) {
+        error(`Unknown plugin subcommand '${subCommand}'. Valid: ${[...VALID_SUBCMDS].join(', ')}`);
+        process.exit(1);
+    }
+
+    const venvPython = venvPythonPath();
+    const systemPython = await getSystemPython();
+    const pythonCmd = fs.existsSync(venvPython) ? venvPython : systemPython;
+
+    return new Promise((resolve) => {
+        const proc = spawn(pythonCmd, ['-m', 'core.plugin_installer', subCommand, ...args.slice(1)], {
+            cwd: rootDir,
+            stdio: 'inherit',
+        });
+        proc.on('close', (code) => {
+            if (code !== 0 && subCommand !== 'list') {
+                console.log(`\n  ${colors.dim}Run ${colors.cyan}limebot plugin${colors.dim} for usage.${colors.reset}\n`);
+            }
+            resolve();
+        });
+        proc.on('error', (err) => {
+            error(`Failed to run plugin installer: ${err.message}`);
+            resolve();
+        });
+    });
+}
+
 async function cmdStatus() {
     console.log(`${colors.lime}${colors.bright}\n  🍋 LimeBot Status${colors.reset}\n`);
 
@@ -1930,12 +1966,17 @@ async function cmdAutorun(args) {
         if (action === 'enable') {
             info(`Creating systemd user service: ${serviceName}`);
             const serviceContent = `[Unit]
-Description=LimeBot Gateway
-After=network.target
+Description=LimeBot 24/7 assistant
+After=network-online.target
+Wants=network-online.target
 
 [Service]
+Type=simple
+WorkingDirectory=${rootDir}
 ExecStart=${gatewayPath}
 Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=default.target
@@ -2419,6 +2460,7 @@ async function main() {
         case 'install-browser': await cmdInstallBrowser(); break;
         case 'feature': await cmdFeature(args.slice(1)); break;
         case 'skill': await cmdSkill(args.slice(1)); break;
+        case 'plugin': await cmdPlugin(args.slice(1)); break;
         case 'autorun': await cmdAutorun(args.slice(1)); break;
         case 'help': case '--help': case '-h':
             await cmdHelp(); break;

@@ -1,0 +1,25 @@
+[Unit]
+Description=LimeBot 24/7 assistant
+Documentation=https://github.com/Ethereal-Lemons/LimeBot-OS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Replace these two paths for a system-wide install, or use:
+#   limebot autorun enable
+# which writes a user unit that already has the correct WorkingDirectory.
+WorkingDirectory=/opt/limebot
+ExecStart=/opt/limebot/bin/gateway.sh
+Restart=always
+RestartSec=5
+TimeoutStartSec=90
+TimeoutStopSec=30
+KillMode=mixed
+Environment=PYTHONUNBUFFERED=1
+
+# External heartbeat: curl -fsS http://127.0.0.1:8000/api/live
+# The process itself stays in the foreground so systemd can supervise it.
+
+[Install]
+WantedBy=multi-user.target

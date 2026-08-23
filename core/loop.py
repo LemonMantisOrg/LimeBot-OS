@@ -72,6 +72,8 @@ from core.context import tool_context
 from core.events import InboundMessage, OutboundMessage
 from core.llm_client import ChatRequest, LimeLLMClient, ProviderConfig
 from core.managed_tasks import ManagedTaskRegistry
+from core.job_queue import FAILED, SUCCEEDED, get_job_queue
+from core.unattended import evaluate_unattended_tool, is_unattended_turn
 from core import prompt as prompt_module
 from core.metrics import MetricsCollector
 from core.prompt_modes import (
@@ -346,6 +348,8 @@ class AgentLoop:
         # maps below remain as compatibility indexes for channel adapters, but
         # lifecycle operations use this registry as the source of truth.
         self.task_registry = ManagedTaskRegistry()
+        self.job_queue = get_job_queue()
+        self._queue_worker_id = uuid.uuid4().hex
         # Background subagents are durable TaskTracker records plus live
         # asyncio handles. The handle map is intentionally separate from
         # active_tasks because these jobs outlive the parent turn.
@@ -2133,8 +2137,13 @@ class AgentLoop:
         return any(lowered.startswith(prefix) for prefix in _CASUAL_PHRASE_PREFIXES)
 
     def _should_include_tools_for_turn(
-        self, content: str, session_key: Optional[str] = None
+        self,
+        content: str,
+        session_key: Optional[str] = None,
+        msg: Optional[InboundMessage] = None,
     ) -> bool:
+        if msg is not None and is_unattended_turn(msg):
+            return True
         if not self._should_include_tools(content):
             return False
         active_capability_state = getattr(self, "_session_capability_state", {}).get(
@@ -2415,6 +2424,7 @@ class AgentLoop:
         is_internal: bool = False,
         is_whatsapp: bool = False,
         function_args: Optional[dict] = None,
+        msg: Optional[InboundMessage] = None,
     ) -> Dict[str, Any]:
         profile = str(
             getattr(self.config, "approval_policy_profile", "manual") or "manual"
@@ -2433,6 +2443,12 @@ class AgentLoop:
                 "reason": "channel_whatsapp_autonomous",
                 "policy_profile": profile,
             }
+        if is_unattended_turn(msg):
+            decision = evaluate_unattended_tool(
+                function_name, function_args, getattr(self, "config", None)
+            )
+            decision["policy_profile"] = profile
+            return decision
         if is_internal:
             return {
                 "allowed": True,
@@ -2713,6 +2729,30 @@ class AgentLoop:
         """
         from core.task_tracker import get_task_tracker
 
+        durable_job_id = (
+            msg.metadata.get("durable_job_id")
+            if isinstance(msg.metadata, dict)
+            else None
+        )
+        if durable_job_id:
+            queue = getattr(self, "job_queue", None)
+            if queue is not None:
+                claimed = queue.claim(
+                    str(durable_job_id), getattr(self, "_queue_worker_id", "agent")
+                )
+                if claimed is None:
+                    current = queue.get(str(durable_job_id))
+                    if current is None or current.status != "queued":
+                        logger.info(
+                            "Skipping inbound duplicate for durable job %s (%s)",
+                            durable_job_id,
+                            current.status if current else "missing",
+                        )
+                        async def _noop():
+                            return None
+
+                        return asyncio.create_task(_noop())
+
         task_id = uuid.uuid4().hex[:12]
         tracker = get_task_tracker()
         await tracker.create_task(
@@ -2772,6 +2812,24 @@ class AgentLoop:
         if start_gate is not None:
             await start_gate.wait()
         await registry.mark_running(task_id)
+        heartbeat_task = None
+        durable_job_id = (
+            msg.metadata.get("durable_job_id")
+            if isinstance(msg.metadata, dict)
+            else None
+        )
+        queue = getattr(self, "job_queue", None)
+        if durable_job_id and queue is not None:
+
+            async def _heartbeat():
+                while True:
+                    await asyncio.sleep(15)
+                    queue.heartbeat(
+                        str(durable_job_id),
+                        getattr(self, "_queue_worker_id", "agent"),
+                    )
+
+            heartbeat_task = asyncio.create_task(_heartbeat())
         try:
             await self._process_message(msg, _task_id=task_id)
         except asyncio.CancelledError:
@@ -2828,6 +2886,41 @@ class AgentLoop:
                 status,
                 error=(tracked.error if tracked is not None else None),
             )
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                await asyncio.gather(heartbeat_task, return_exceptions=True)
+            if durable_job_id and queue is not None:
+                error_text = tracked.error if tracked is not None else None
+                if status == TaskStatus.COMPLETED.value:
+                    finished = queue.finish(str(durable_job_id), SUCCEEDED)
+                elif status == TaskStatus.CANCELLED.value:
+                    finished = queue.finish(str(durable_job_id), "cancelled")
+                else:
+                    finished = queue.fail_or_retry(
+                        str(durable_job_id), error_text or "Agent turn failed."
+                    )
+                cron_job_id = (
+                    msg.metadata.get("original_job_id")
+                    if isinstance(msg.metadata, dict)
+                    else None
+                )
+                scheduler = getattr(self, "scheduler", None)
+                if cron_job_id and scheduler is not None and hasattr(
+                    scheduler, "mark_run_finished"
+                ):
+                    cron_status = "ok"
+                    if finished is not None and finished.status == FAILED:
+                        cron_status = "error"
+                    elif status != TaskStatus.COMPLETED.value:
+                        cron_status = "error"
+                    await scheduler.mark_run_finished(
+                        str(cron_job_id),
+                        status=cron_status,
+                        error=error_text,
+                        tracker_task_id=msg.metadata.get("tracker_task_id")
+                        if isinstance(msg.metadata, dict)
+                        else None,
+                    )
             if self.active_tasks.get(msg.session_key) is asyncio.current_task():
                 self.active_tasks.pop(msg.session_key, None)
 
@@ -5777,6 +5870,7 @@ class AgentLoop:
                         is_internal=is_internal,
                         is_whatsapp=is_whatsapp,
                         function_args=function_args,
+                        msg=msg,
                     )
                     client_source = str(
                         getattr(msg, "channel", "") or "system"
@@ -5794,6 +5888,19 @@ class AgentLoop:
                                 "decision_reason": approval["reason"],
                                 "client_source": client_source,
                             },
+                        )
+
+                    if not approval["allowed"] and not approval["requires_confirmation"]:
+                        return (
+                            tc_id,
+                            function_name,
+                            function_args,
+                            (
+                                "ACTION CANCELLED: Unattended policy denied "
+                                f"{function_name} ({approval['reason']})."
+                            ),
+                            False,
+                            is_internal,
                         )
 
                     if approval["requires_confirmation"]:
@@ -5984,6 +6091,17 @@ class AgentLoop:
                 self.metrics.record_tool_call(
                     session_key, function_name, time.time() - t0
                 )
+                durable_job_id = (
+                    msg.metadata.get("durable_job_id")
+                    if msg is not None and isinstance(msg.metadata, dict)
+                    else None
+                )
+                if durable_job_id and not str(result).startswith(
+                    ("Error:", "ACTION CANCELLED:", "ACTION BLOCKED:")
+                ):
+                    getattr(self, "job_queue", None) and self.job_queue.mark_side_effect(
+                        str(durable_job_id), function_name
+                    )
 
             except Exception as e:
                 result = str(e)
@@ -7304,7 +7422,9 @@ class AgentLoop:
             ):
                 return
 
-            if not msg.metadata.get("is_scheduler"):
+            if not (
+                msg.metadata.get("is_scheduler") or is_unattended_turn(msg)
+            ):
                 if not self.get_readiness_status()["ready"]:
                     await self._publish_activity(
                         msg,
@@ -7899,7 +8019,7 @@ class AgentLoop:
                         (
                             forced_skill_name
                             or self._should_include_tools_for_turn(
-                                content, session_key=session_key
+                                content, session_key=session_key, msg=msg
                             )
                         )
                         and not plan_mode

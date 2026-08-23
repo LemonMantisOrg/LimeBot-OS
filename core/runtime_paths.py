@@ -38,16 +38,42 @@ def get_allowed_paths_file() -> Path:
     return get_state_dir() / "allowed_paths.txt"
 
 
+def get_data_dir() -> Path:
+    return get_state_dir() / "data"
+
+
 def get_skills_dir() -> Path:
     return get_state_dir() / "skills"
 
 
+def get_plugins_dir() -> Path:
+    return get_state_dir() / "plugins"
+
+
+def get_plugin_skill_dirs() -> list[Path]:
+    """Return skills/ directories from installed Cursor plugins."""
+
+    plugins_dir = get_plugins_dir()
+    if not plugins_dir.is_dir():
+        return []
+    found: list[Path] = []
+    for plugin in sorted(plugins_dir.iterdir()):
+        skills = plugin / "skills"
+        if skills.is_dir():
+            found.append(skills)
+    return found
+
+
 def get_skill_dirs() -> list[Path]:
-    """Return shipped skills plus the optional user-owned skills directory."""
+    """Return shipped skills, user-owned skills, and installed plugin skills."""
 
     project_skills = PROJECT_DIR / "skills"
     state_skills = get_skills_dir()
-    return [project_skills] if project_skills == state_skills else [project_skills, state_skills]
+    dirs = [project_skills]
+    if state_skills != project_skills:
+        dirs.append(state_skills)
+    dirs.extend(get_plugin_skill_dirs())
+    return dirs
 
 
 def ensure_state_dir() -> Path:

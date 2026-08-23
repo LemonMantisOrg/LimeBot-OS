@@ -1,0 +1,6 @@
+---
+description: Plugin names must be lowercase kebab-case
+alwaysApply: true
+---
+
+Use lowercase kebab-case plugin names that start and end with an alphanumeric character.

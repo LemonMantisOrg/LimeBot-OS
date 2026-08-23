@@ -389,8 +389,8 @@ class Toolbox:
             return (
                 "Error: This command starts LimeBot's long-running backend, so "
                 "run_command will never finish. Use `limebot start`/`npm start` "
-                "to launch the service. For GitHub authentication, run the skill "
-                "entrypoint instead: `python skills/github/main.py user-info`."
+                "to launch the service. For one-shot skill scripts, invoke the "
+                "skill entrypoint instead of `main.py`."
             )
         return None
 
@@ -1869,7 +1869,7 @@ class Toolbox:
             return (
                 "Error: Chained shell commands are blocked. LimeBot already runs "
                 "commands from the project directory; run only the intended command "
-                "(for example, python skills/github/main.py user-info)."
+                "(for example, python skills/docx-creator/scripts/create_docx.py)."
             )
 
         long_running_hint = self._long_running_command_hint(command)

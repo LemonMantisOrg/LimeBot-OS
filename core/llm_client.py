@@ -14,7 +14,9 @@ from dataclasses import dataclass
 import hashlib
 import logging
 import mimetypes
+import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -186,6 +188,18 @@ class LimeLLMClient:
         ]
 
     async def complete(self, provider: ProviderConfig, request: ChatRequest) -> Any:
+        test_mode = str(os.getenv("LIMEBOT_TEST_LLM_MODE") or "").strip().lower()
+        if test_mode:
+            sleep_s = float(os.getenv("LIMEBOT_TEST_LLM_SLEEP") or "0" or 0)
+            if sleep_s > 0:
+                await asyncio.sleep(sleep_s)
+            reply = os.getenv("LIMEBOT_TEST_LLM_REPLY") or "Durable job completed."
+            if request.stream:
+                return _TestLLMStream(reply)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=reply, tool_calls=None))],
+                usage=None,
+            )
         messages = _resolve_local_image_urls(request.messages)
         if provider.is_codex:
             helper = stream_codex_response if request.stream else complete_codex_response
@@ -235,3 +249,30 @@ class LimeLLMClient:
                 provider.source_model,
             )
             return await acompletion(**compatibility_kwargs)
+
+
+class _TestLLMStream:
+    """Async iterator that mimics a LiteLLM streaming completion."""
+
+    def __init__(self, content: str):
+        self._chunks = [
+            SimpleNamespace(
+                usage=None,
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(content=content, tool_calls=None)
+                    )
+                ],
+            )
+        ]
+        self._index = 0
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._index >= len(self._chunks):
+            raise StopAsyncIteration
+        chunk = self._chunks[self._index]
+        self._index += 1
+        return chunk

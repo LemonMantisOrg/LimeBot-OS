@@ -1,5 +1,4 @@
 import { statusLabel, type CompanionStatus } from "@/lib/protocol";
-import { PetSprite } from "@/components/PetSprite";
 
 type MascotBubbleProps = {
   status: CompanionStatus;
@@ -20,7 +19,9 @@ export function MascotBubble({
       {avatarUrl ? (
         <img className="mascot-image" src={avatarUrl} alt={`${botName} avatar`} />
       ) : (
-        <PetSprite status={status} label={`${botName} ${status}`} />
+        <div className="mascot-image mascot-fallback" aria-label={`${botName} ${status}`}>
+          🍋
+        </div>
       )}
       {showLabel ? <span className="mascot-label">{statusLabel(status)}</span> : null}
     </div>

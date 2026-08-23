@@ -54,7 +54,7 @@ export function VoicePage() {
     const [saving, setSaving] = useState(false);
 
     // Preview state
-    const [previewText, setPreviewText] = useState("Hi, I'm Jennie, your AI assistant! How is your day going?");
+    const [previewText, setPreviewText] = useState("Hi, I'm LimeBot, your AI assistant! How is your day going?");
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
     const [generatingPreview, setGeneratingPreview] = useState(false);
 

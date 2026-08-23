@@ -79,7 +79,7 @@ class TestScheduler(unittest.IsolatedAsyncioTestCase):
             time.time(),
             "Skipped recurring jobs should advance to a future trigger.",
         )
-        self.assertEqual(scheduler.job_state["stale123"]["lastStatus"], "ok")
+        self.assertEqual(scheduler.job_state["stale123"]["lastStatus"], "running")
 
     async def test_future_trigger_replays_latest_missed_cron_slot(self):
         from core.scheduler import CronManager
@@ -183,15 +183,21 @@ class TestScheduler(unittest.IsolatedAsyncioTestCase):
             time.time(),
             "Recurring jobs should be rescheduled to a future trigger.",
         )
-        self.assertEqual(scheduler.job_state["recent123"]["lastStatus"], "ok")
+        self.assertEqual(scheduler.job_state["recent123"]["lastStatus"], "running")
         self.assertIn("lastDurationMs", scheduler.job_state["recent123"])
         self.assertGreater(scheduler.job_state["recent123"]["nextRunAtMs"], int(time.time() * 1000))
 
         run_file = scheduler.runs_dir / "recent123.jsonl"
         self.assertTrue(run_file.exists())
         run_log = run_file.read_text(encoding="utf-8")
-        self.assertIn('"type": "job_finished"', run_log)
+        self.assertIn('"type": "job_enqueued"', run_log)
         self.assertIn('"durationMs"', run_log)
+        self.assertNotIn('"type": "job_finished"', run_log)
+
+        await scheduler.mark_run_finished("recent123", status="ok")
+        self.assertEqual(scheduler.job_state["recent123"]["lastStatus"], "ok")
+        run_log = run_file.read_text(encoding="utf-8")
+        self.assertIn('"type": "job_finished"', run_log)
 
     async def test_inactive_job_does_not_execute_until_resumed(self):
         from core.scheduler import CronManager

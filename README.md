@@ -126,7 +126,7 @@ LimeBot is a fully-featured MCP client:
 | **Web Dashboard** | React + Vite UI connecting over WebSocket. Streams tokens as they arrive, shows live tool execution cards, confirmation prompts, thinking traces, and ghost activity indicators. **Includes a Custom CSS editor for global UI personalization.** |
 | **Discord** | Full `discord.py` integration. Responds to DMs and `@mentions`. Configurable allow-list by user ID and channel ID. Custom presence status, activity type, and display name. |
 | **WhatsApp** | Connects to a local `whatsapp-web.js` bridge over WebSocket. Contact approval whitelist with pending/blocked states. QR code displayed in the web dashboard for easy pairing. |
-| **Telegram** | Bot API long-polling scaffold. Supports text send/receive, per-user allow-listing, optional per-chat allow-listing, and startup wiring for future expansion. |
+| **Telegram** | Bot API long-polling. Supports text send/receive, per-user allow-listing, optional per-chat allow-listing, typing indicators, and 4096-character chunking. |
 
 ### 🧩 Browser Companion Extension
 
@@ -174,10 +174,19 @@ Skills extend what LimeBot can do. Each skill is a folder with a `SKILL.md` (the
 |-------|-------------|
 | `browser` | Full Playwright web browsing  navigate, click, type, search, extract |
 | `download_image` | Download high-res images from Pinterest, Reddit, Wikimedia, or direct URLs |
-| `filesystem` | Extended file operations beyond the core toolbox |
+| `filesystem` | Strategy guide for LimeBot's sandboxed file tools |
 | `discord` | Optional higher-level Discord administration helpers |
 | `docx-creator` | Create, inspect, edit, and validate Microsoft Word `.docx` documents |
-| `hatch-pet` | Create, validate, QA, and install v2 animated pets for the dashboard and browser companion |
+| `scrapling` | Stealthy page extraction when the browser skill is not enough |
+| `watch` | How to use the native `analyze_video` tool |
+
+GitHub work is no longer a built-in LimeBot skill. Install the official Cursor plugin instead:
+
+```bash
+limebot plugin install cursor/plugins/github
+# or from this repo's fixture / a local checkout:
+limebot plugin install ./path/to/third_party/github
+```
 
 **Install community skills from GitHub:**
 ```bash
@@ -203,6 +212,21 @@ python -m core.skill_installer disable <skill_name>
 ```
 
 Skills can also be managed from the **Skills** tab in the web dashboard.
+
+### Cursor plugins
+
+LimeBot understands the Cursor plugin package format (`.cursor-plugin/plugin.json`,
+optional `marketplace.json`, `skills/*/SKILL.md`, `mcp.json`, and rules).
+
+```bash
+limebot plugin install cursor/plugins/create-plugin
+limebot plugin install ./tests/fixtures/cursor-plugins/github
+limebot plugin list
+```
+
+Installed plugins land under `$LIMEBOT_STATE_DIR/plugins`. Their skills are
+loaded by the existing skill registry; their MCP servers are merged into
+`mcp/mcp_config.json`.
 
 ---
 
@@ -448,6 +472,30 @@ docker compose logs -f backend
 docker compose down
 ```
 
+### 24/7 deploy
+
+Durable jobs are written to `data/jobs.sqlite` before the agent runs. A crash
+re-queues interrupted work; cron is marked `ok` only after the agent turn
+finishes. Live chat stays confirmation-gated. Scheduled/queued jobs use:
+
+```env
+UNATTENDED_PATH_ALLOWLIST=./persona,./temp,./logs
+UNATTENDED_COMMAND_ALLOWLIST=python,gh
+```
+
+Supervise the process so recovery can actually happen:
+
+```bash
+# Linux host
+limebot autorun enable
+# or install deploy/systemd/limebot.service and point WorkingDirectory at your checkout
+
+# Heartbeat
+curl -fsS http://127.0.0.1:8000/api/live
+```
+
+Docker already uses `restart: unless-stopped`. See [deploy/systemd/README.md](deploy/systemd/README.md).
+
 The backend port is intentionally not published. Do not publish it while
 `LIMEBOT_TRUSTED_PROXY_ONLY=true` unless `APP_API_KEY` is also configured.
 To expose the dashboard on a LAN, set `LIMEBOT_DOCKER_BIND_HOST=0.0.0.0` and a
@@ -519,7 +567,9 @@ prevent accidental actions; they do not change provider generation speed.
 - **Sandboxed Filesystem**  LimeBot can only read/write files in directories you explicitly whitelist.
 - **Human-in-the-loop**  sensitive actions (running shell commands, modifying/deleting files) require your explicit approval.
   > [!IMPORTANT]
-  > By default, dangerous actions will pause and wait for you to click "Approve" on the Web Dashboard. You can optionally bypass this security gate by enabling **Autonomous Mode** (via `AUTONOMOUS_MODE=true` in settings).
+  > By default, dangerous actions in live chat pause for dashboard approval.
+  > Scheduled and queued jobs use `UNATTENDED_PATH_ALLOWLIST` /
+  > `UNATTENDED_COMMAND_ALLOWLIST` instead of forcing `AUTONOMOUS_MODE=true`.
 - **Open Source**  audit the code yourself. No hidden telemetry.
 
 ---

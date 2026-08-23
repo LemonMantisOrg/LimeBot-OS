@@ -179,6 +179,17 @@ def load_config(force_reload=False):
     )
     # Keep old integrations working while the named profile remains authoritative.
     config.autonomous_mode = config.approval_policy_profile == "autonomous"
+    config.unattended = SimpleNamespace()
+    config.unattended.path_allowlist = [
+        part.strip()
+        for part in os.getenv("UNATTENDED_PATH_ALLOWLIST", "").split(",")
+        if part.strip()
+    ]
+    config.unattended.command_allowlist = [
+        part.strip()
+        for part in os.getenv("UNATTENDED_COMMAND_ALLOWLIST", "").split(",")
+        if part.strip()
+    ]
     config.allow_unsafe_commands = (
         os.getenv("ALLOW_UNSAFE_COMMANDS", "false").lower() == "true"
     )
@@ -363,6 +374,9 @@ def load_config(force_reload=False):
     for allowed_root in (limebot_root, str(state_dir)):
         if allowed_root not in config.whitelist.allowed_paths:
             config.whitelist.allowed_paths.append(allowed_root)
+
+    if not config.unattended.path_allowlist:
+        config.unattended.path_allowlist = list(config.whitelist.allowed_paths)
 
     config.whitelist.api_key = os.getenv("APP_API_KEY")
     config.personality_whitelist = [

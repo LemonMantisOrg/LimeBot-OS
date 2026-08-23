@@ -4,7 +4,6 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { BotVisual } from "@/components/pet/BotVisual";
-import type { PetManifest, PetState } from "@/lib/pet";
 import { cn } from "@/lib/utils";
 import { Send, Brain, Power, Paperclip, X, Plus, ArrowDown, ShieldAlert, Wifi, WifiOff, Play, Pause, Volume2, VolumeX, Download, Square, Pencil } from "lucide-react";
 import {
@@ -69,10 +68,6 @@ interface ChatInterfaceProps {
     isConnected: boolean;
     isTyping?: boolean;
     botIdentity?: { name: string; avatar: string | null };
-    petState?: PetState;
-    petEnabled?: boolean;
-    preferAnimatedPet?: boolean;
-    petManifest?: PetManifest;
     onInputChange: (value: string) => void;
     onSendMessage: (
         content?: string | null,
@@ -327,25 +322,13 @@ const UnreadSeparator = ({ count }: { count: number }) => (
 
 function TypingIndicator({
     botIdentity,
-    petState,
-    petEnabled,
-    preferAnimatedPet,
-    petManifest,
 }: {
     botIdentity?: { name: string; avatar: string | null };
-    petState?: PetState;
-    petEnabled?: boolean;
-    preferAnimatedPet?: boolean;
-    petManifest?: PetManifest;
 }) {
     return (
         <div className="flex w-full max-w-[48rem] gap-3 animate-in fade-in slide-in-from-bottom-2 duration-200">
             <BotVisual
                 avatar={botIdentity?.avatar}
-                petState={petState}
-                petEnabled={petEnabled}
-                preferAnimatedPet={preferAnimatedPet}
-                manifest={petManifest}
                 size="chat"
             />
             <div className="flex items-center">
@@ -480,10 +463,6 @@ export function VoiceAudioPlayer({ url }: { url: string }) {
 const MemoizedMessageItem = memo(({
     msg,
     botIdentity,
-    petState,
-    petEnabled,
-    preferAnimatedPet,
-    petManifest,
     handleToolConfirmSideChannel,
     onSendMessage,
     onStartEdit,
@@ -493,10 +472,6 @@ const MemoizedMessageItem = memo(({
 }: {
     msg: Message;
     botIdentity: ChatInterfaceProps['botIdentity'];
-    petState?: PetState;
-    petEnabled?: boolean;
-    preferAnimatedPet?: boolean;
-    petManifest?: PetManifest;
     handleToolConfirmSideChannel: (confId: string, approved: boolean, sessionWhitelist: boolean) => Promise<void>;
     onSendMessage: ChatInterfaceProps['onSendMessage'];
     onStartEdit: (message: Message) => void;
@@ -525,10 +500,6 @@ const MemoizedMessageItem = memo(({
             {isBot && showAvatar ? (
                 <BotVisual
                     avatar={botIdentity?.avatar}
-                    petState={petState}
-                    petEnabled={petEnabled}
-                    preferAnimatedPet={preferAnimatedPet}
-                    manifest={petManifest}
                     size="chat"
                 />
             ) : isBot ? (
@@ -650,10 +621,6 @@ export function ChatInterface({
     isConnected,
     isTyping,
     botIdentity,
-    petState,
-    petEnabled,
-    preferAnimatedPet,
-    petManifest,
     onInputChange,
     onSendMessage,
     onEditMessage,
@@ -1231,10 +1198,6 @@ export function ChatInterface({
                             <div className="flex flex-col items-center justify-center py-12 text-center">
                                 <BotVisual
                                     avatar={botIdentity?.avatar}
-                                    petState={petState}
-                                    petEnabled={petEnabled}
-                                    preferAnimatedPet={preferAnimatedPet}
-                                    manifest={petManifest}
                                     size="hero"
                                 />
                                 <div className="mt-4 space-y-1">
@@ -1332,20 +1295,12 @@ export function ChatInterface({
                                                 <ToolTimeline
                                                     executions={item.executions}
                                                     botIdentity={botIdentity}
-                                                    petState={petState}
-                                                    petEnabled={petEnabled}
-                                                    preferAnimatedPet={preferAnimatedPet}
-                                                    petManifest={petManifest}
                                                     onConfirmSideChannel={handleToolConfirmSideChannel}
                                                 />
                                             ) : (
                                                 <MemoizedMessageItem
                                                     msg={item.msg}
                                                     botIdentity={botIdentity}
-                                                    petState={petState}
-                                                    petEnabled={petEnabled}
-                                                    preferAnimatedPet={preferAnimatedPet}
-                                                    petManifest={petManifest}
                                                     handleToolConfirmSideChannel={handleToolConfirmSideChannel}
                                                     onSendMessage={onSendMessage}
                                                     onStartEdit={startEditingMessage}
@@ -1373,10 +1328,6 @@ export function ChatInterface({
                         return !botAlreadyStreaming ? (
                             <TypingIndicator
                                 botIdentity={botIdentity}
-                                petState={petState}
-                                petEnabled={petEnabled}
-                                preferAnimatedPet={preferAnimatedPet}
-                                petManifest={petManifest}
                             />
                         ) : null;
                     })()}

@@ -3,19 +3,14 @@ import { ChevronDown, ChevronUp, CheckCircle2, XCircle, Loader2 } from "lucide-r
 import { cn } from "@/lib/utils";
 import { ToolExecution } from "./ToolCard";
 import { BotVisual } from "@/components/pet/BotVisual";
-import type { PetManifest, PetState } from "@/lib/pet";
 
 interface ToolTimelineProps {
     executions: ToolExecution[];
     botIdentity?: { name: string; avatar: string | null };
-    petState?: PetState;
-    petEnabled?: boolean;
-    preferAnimatedPet?: boolean;
-    petManifest?: PetManifest;
     onConfirmSideChannel?: (confId: string, approved: boolean, sessionWhitelist: boolean) => Promise<void>;
 }
 
-export function ToolTimeline({ executions, botIdentity, petState, petEnabled, preferAnimatedPet, petManifest, onConfirmSideChannel }: ToolTimelineProps) {
+export function ToolTimeline({ executions, botIdentity, onConfirmSideChannel }: ToolTimelineProps) {
     const [expanded, setExpanded] = useState(false);
     const [selectedToolId, setSelectedToolId] = useState<string | null>(null);
     const [confirmationConfId, setConfirmationConfId] = useState<string | null>(null);
@@ -136,10 +131,6 @@ export function ToolTimeline({ executions, botIdentity, petState, petEnabled, pr
         <div className="flex w-full gap-4 max-w-[90%] min-w-0">
             <BotVisual
                 avatar={botIdentity?.avatar}
-                petState={petState}
-                petEnabled={petEnabled}
-                preferAnimatedPet={preferAnimatedPet}
-                manifest={petManifest}
                 size="chat"
             />
 

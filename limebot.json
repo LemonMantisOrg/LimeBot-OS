@@ -2,12 +2,10 @@
   "skills": {
     "enabled": [
       "browser",
-      "browser-harness",
       "download_image",
       "filesystem",
       "discord",
       "docx-creator",
-      "github",
       "scrapling"
     ],
     "installed": {}

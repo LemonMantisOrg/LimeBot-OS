@@ -1,9 +1,0 @@
-{
-  "defaultPetId": "jennie",
-  "pets": [
-    {
-      "id": "jennie",
-      "manifestPath": "/pets/jennie/manifest.json"
-    }
-  ]
-}

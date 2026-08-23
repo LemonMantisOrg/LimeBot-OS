@@ -14,11 +14,11 @@ Documentation split:
 LimeBot is an **event-driven agentic system**. Every user interaction is an `InboundMessage` that flows through an async message bus, gets processed by the agent loop, and produces `OutboundMessage` events routed back to the originating channel.
 
 ```
-Channel (Discord / WhatsApp / Web)
+Channel (Discord / WhatsApp / Web / Telegram) or CronManager
         │  InboundMessage
         ▼
-   MessageBus (asyncio.Queue)
-        │
+   DurableJobQueue (SQLite) for scheduled/queued work
+        │  then MessageBus (asyncio.Queue)
         ▼
    AgentLoop._process_message()
      ├─ Auto-RAG (vector search + grep)
@@ -401,7 +401,7 @@ skills/
 ```json
 {
   "skills": {
-    "enabled": ["browser", "download_image", "filesystem"]
+    "enabled": ["browser", "download_image", "filesystem", "discord", "docx-creator", "scrapling"]
   }
 }
 ```
@@ -452,6 +452,19 @@ Sensitive tools: `edit_file`, `write_file`, `delete_file`, `run_command`, `cron_
 - `APPROVAL_POLICY_PROFILE=autonomous` in `.env` — skips confirmation for sensitive tools
 - `AUTONOMOUS_MODE=true` — legacy alias used only when no named profile is set
 - Per-session whitelist — user clicked "Always allow this session"
+- **Unattended jobs** — scheduled/queued work (`metadata.is_scheduler` or a durable job id) auto-approves sensitive tools only when the path or command matches `UNATTENDED_PATH_ALLOWLIST` / `UNATTENDED_COMMAND_ALLOWLIST`. Live chat stays gated. This is not a global autonomous switch.
+
+### Durable job queue (`core/job_queue.py`)
+
+SQLite at `data/jobs.sqlite` (or `$LIMEBOT_STATE_DIR/data/jobs.sqlite`). Cron and explicit queued work persist **before** `publish_inbound`. States: `queued` → `running` → `succeeded|failed|cancelled`. Exclusive lease + heartbeat. On boot, interrupted `running` jobs are re-queued instead of fail-closed. Transient provider errors retry with backoff unless an irreversible tool already succeeded. Cron `last_status=ok` is written only from `CronManager.mark_run_finished()` after the agent turn ends.
+
+TaskTracker's JSON projection still fail-closes dead coroutines for the dashboard. The SQLite queue is the source of truth for work that must resume.
+
+### Cursor plugins (`core/plugin_manifest.py`, `core/plugin_installer.py`)
+
+`limebot plugin install` accepts a local Cursor plugin folder or a GitHub path such as `cursor/plugins/github` (resolved to `third_party/github`) or `cursor/plugins/create-plugin`. Official schemas are vendored under `schemas/cursor-plugin/`. Skills load through `get_skill_dirs()`; MCP servers merge into `mcp/mcp_config.json`. Do not vendor the entire `cursor/plugins` tree.
+
+GitHub capability is provided by the official plugin, not a built-in `skills/github` tree.
 
 **Path enforcement:** Every filesystem tool call goes through `_is_path_allowed()`. Blocked:
 - Anything outside `ALLOWED_PATHS` + project root
@@ -514,6 +527,8 @@ npm run lime-bot <command> [options]
 | `logs` | Tail `logs/limebot.log` |
 | `skill list` | List installed skills |
 | `skill install <url>` | Install from GitHub |
+| `plugin install <source>` | Install a Cursor plugin package (local folder or `owner/repo/path`) |
+| `plugin list` / `plugin uninstall` | List or remove installed plugins |
 | `skill uninstall <name>` | Remove a skill |
 | `skill enable <name>` | Enable a disabled skill |
 | `skill disable <name>` | Disable without uninstalling |
@@ -559,6 +574,9 @@ npm link
   stay in their own images.
 - Backend, frontend, and bridge define liveness health checks. Frontend startup
   waits for backend health rather than mere process creation.
+- Host 24/7 deploy uses `deploy/systemd/limebot.service` (or
+  `limebot autorun enable`) with `GET /api/live` as the heartbeat. Compose
+  already sets `restart: unless-stopped`.
 - Root, web, and bridge build contexts each exclude credentials, local state,
   dependency trees, generated output, and session data.
 
