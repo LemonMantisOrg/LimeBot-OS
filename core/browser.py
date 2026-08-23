@@ -1054,18 +1054,22 @@ class BrowserManager:
                 # Large ISOs and installers need minutes, not 30 seconds.
                 timeout_ms = max(1_000, min(int(timeout_ms or 30_000), 1_800_000))
                 page = await self._ensure_browser()
-                if direct_url and not element:
-                    async with page.expect_download(timeout=timeout_ms) as pending:
-                        await page.goto(direct_url, wait_until="commit")
-                else:
-                    locator = self._element_map[element]
-                    try:
-                        await locator.scroll_into_view_if_needed(timeout=2_000)
-                    except Exception:
-                        pass
-                    async with page.expect_download(timeout=timeout_ms) as pending:
+                async with page.expect_download(timeout=timeout_ms) as pending:
+                    if direct_url and not element:
+                        try:
+                            await page.goto(direct_url, wait_until="commit")
+                        except Exception as nav_exc:
+                            # Direct file URLs abort navigation when the download starts.
+                            if "Download is starting" not in str(nav_exc):
+                                raise
+                    else:
+                        locator = self._element_map[element]
+                        try:
+                            await locator.scroll_into_view_if_needed(timeout=2_000)
+                        except Exception:
+                            pass
                         await locator.click()
-                download = await pending.value
+                    download = await pending.value
 
                 failure = await download.failure()
                 if failure:
