@@ -451,8 +451,9 @@ class DurableJobQueue:
                 attempt = int(row["attempt"] or 0)
                 max_attempts = int(row["max_attempts"] or 3)
                 side_effects = bool(row["side_effects"])
-                retryable = (not side_effects) and is_transient_error(error)
-                if retryable and attempt < max_attempts:
+                transient = is_transient_error(error)
+                retryable = (not side_effects) and transient and attempt < max_attempts
+                if retryable:
                     delay = min(60.0, 2.0 ** max(0, attempt - 1))
                     conn.execute(
                         """
@@ -466,7 +467,7 @@ class DurableJobQueue:
                     )
                 else:
                     reason = error
-                    if side_effects and retryable:
+                    if side_effects and transient:
                         reason = (
                             f"{error} (not retried: irreversible side effects already ran)"
                         )
