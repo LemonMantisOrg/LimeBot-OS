@@ -16,15 +16,21 @@ class TestUnattendedPolicy(unittest.TestCase):
         msg = InboundMessage("web", "u", "c", "hello")
         self.assertFalse(is_unattended_turn(msg))
 
-    def test_scheduler_and_durable_flags_are_unattended(self):
+    def test_scheduler_and_explicit_unattended_flags_are_unattended(self):
         cron = InboundMessage(
             "web", "u", "c", "x", metadata={"is_scheduler": True}
         )
-        queued = InboundMessage(
-            "web", "u", "c", "x", metadata={"durable_job_id": "abc"}
+        unattended = InboundMessage(
+            "web", "u", "c", "x", metadata={"durable_job_id": "abc", "unattended": True}
         )
         self.assertTrue(is_unattended_turn(cron))
-        self.assertTrue(is_unattended_turn(queued))
+        self.assertTrue(is_unattended_turn(unattended))
+
+    def test_durable_live_chat_still_requires_confirmation(self):
+        durable = InboundMessage(
+            "web", "u", "c", "x", metadata={"durable": True, "durable_job_id": "abc"}
+        )
+        self.assertFalse(is_unattended_turn(durable))
 
     def test_path_and_command_allowlists(self):
         self.assertTrue(path_is_allowlisted("temp/out.txt", ["temp"]))
@@ -86,3 +92,18 @@ class TestUnattendedPolicy(unittest.TestCase):
         )
         self.assertTrue(live["requires_confirmation"])
         self.assertEqual(live["reason"], "manual_required")
+
+        durable_live = loop._get_tool_approval_decision(
+            "web_jobs",
+            "write_file",
+            function_args={"path": "temp/report.txt"},
+            msg=InboundMessage(
+                "web",
+                "user",
+                "jobs",
+                "write the report",
+                metadata={"durable": True, "durable_job_id": "chat-1"},
+            ),
+        )
+        self.assertTrue(durable_live["requires_confirmation"])
+        self.assertEqual(durable_live["reason"], "manual_required")

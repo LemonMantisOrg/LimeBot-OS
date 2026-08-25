@@ -50,6 +50,60 @@ def _provider_rejects_tool_choice_in_thinking_mode(error: Exception) -> bool:
     )
 
 
+def _provider_rejects_missing_reasoning_replay(error: Exception) -> bool:
+    """Recognize a provider-confirmed missing DeepSeek reasoning trace."""
+    message = str(error).lower()
+    return (
+        "reasoning_content" in message
+        and "thinking mode" in message
+        and (
+            "must be passed back" in message
+            or "must be provided" in message
+            or "cannot be omitted" in message
+        )
+    )
+
+
+def _is_deepseek_provider(
+    source_model: Optional[str],
+    model: Optional[str],
+    base_url: Optional[str],
+) -> bool:
+    """Recognize DeepSeek even when it is routed through a gateway.
+
+    The source model is not always a direct ``deepseek/...`` ID. OpenRouter,
+    custom proxies, and older saved settings can expose the same model as
+    ``openrouter/deepseek/...`` or simply ``deepseek-vX``. History replay rules
+    are provider rules, so inspect every non-secret provider identity field at
+    the common request boundary.
+    """
+    return any(
+        "deepseek" in str(value or "").strip().lower()
+        for value in (source_model, model, base_url)
+    )
+
+
+def _is_direct_deepseek_thinking_endpoint(
+    source_model: Optional[str],
+    model: Optional[str],
+    base_url: Optional[str],
+) -> bool:
+    """Return whether the request targets DeepSeek's own thinking endpoint.
+
+    Gateways may translate or accept ``tool_choice`` differently. Keep their
+    compatibility retry behavior intact while still applying DeepSeek history
+    replay rules to gateway-routed requests.
+    """
+    source = str(source_model or "").strip().lower()
+    endpoint = str(base_url or "").strip().lower()
+    model_name = str(model or "").strip().lower()
+    return source.startswith("deepseek/") or (
+        "deepseek" in model_name
+        and "deepseek.com" in endpoint
+        and "openrouter" not in endpoint
+    )
+
+
 def _bounded_tool_call_id(tool_call_id: Any) -> str:
     """Return a deterministic OpenAI-safe ID without breaking tool-result links."""
     normalized = str(tool_call_id or "")
@@ -259,7 +313,11 @@ class LimeLLMClient:
                 request.tool_choice,
             )
 
-        if provider.source_model.lower().startswith("deepseek/"):
+        if _is_deepseek_provider(
+            provider.source_model,
+            provider.model,
+            provider.base_url,
+        ):
             repaired_messages = _drop_unreplayable_deepseek_tool_turns(messages)
             if len(repaired_messages) != len(messages):
                 logger.warning(
@@ -289,7 +347,11 @@ class LimeLLMClient:
             # OpenAI-compatible tool_choice parameter, including "auto".
             # The prompt and tool schemas still give the model the required
             # context; forcing a choice is not available on this endpoint.
-            deepseek_thinking = provider.source_model.lower().startswith("deepseek/")
+            deepseek_thinking = _is_direct_deepseek_thinking_endpoint(
+                provider.source_model,
+                provider.model,
+                provider.base_url,
+            )
             if request.tool_choice is not None and not deepseek_thinking:
                 kwargs["tool_choice"] = request.tool_choice
         if request.stream:
@@ -300,6 +362,17 @@ class LimeLLMClient:
         try:
             return await acompletion(**kwargs)
         except Exception as exc:
+            if _provider_rejects_missing_reasoning_replay(exc):
+                repaired_messages = _drop_unreplayable_deepseek_tool_turns(messages)
+                if len(repaired_messages) != len(messages):
+                    compatibility_kwargs = dict(kwargs)
+                    compatibility_kwargs["messages"] = repaired_messages
+                    logger.warning(
+                        "Provider rejected an unreplayable reasoning trace for %s; "
+                        "retrying without the affected legacy tool exchange.",
+                        provider.source_model,
+                    )
+                    return await acompletion(**compatibility_kwargs)
             if request.tools and _provider_rejects_tool_choice_in_thinking_mode(exc):
                 compatibility_kwargs = dict(kwargs)
                 compatibility_kwargs.pop("tool_choice", None)

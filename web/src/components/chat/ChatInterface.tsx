@@ -19,7 +19,6 @@ import { Loader2 } from "lucide-react";
 import { ToolCard, ToolExecution } from './ToolCard';
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { AlertTriangle, Info } from "lucide-react";
-import { ThinkingBubble } from './ThinkingBubble';
 import { toast } from "sonner";
 import type { ChatAttachment, ChatChangeSet } from "@/lib/chat-state";
 import { readinessLabel, type AgentReadiness } from "@/lib/agent-readiness";
@@ -550,14 +549,6 @@ const MemoizedMessageItem = memo(({
                     </Alert>
                 ) : (
                     <>
-                        {!isUser && msg.thinking && (
-                            <ThinkingBubble
-                                content={msg.thinking}
-                                isComplete={!msg.isStreaming}
-                                defaultCollapsed={!msg.isStreaming && !!msg.content}
-                            />
-                        )}
-
                         {(msg.content || renderableAttachments.length > 0) && (
                             <div className={cn(
                                 "relative max-w-full overflow-hidden transition-all duration-200",

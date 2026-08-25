@@ -491,7 +491,8 @@ docker compose down
 
 Durable jobs are written to `data/jobs.sqlite` before the agent runs. A crash
 re-queues interrupted work; cron is marked `ok` only after the agent turn
-finishes. Live chat stays confirmation-gated. Scheduled/queued jobs use:
+finishes. Live chat stays confirmation-gated, including after a restart.
+Scheduled or explicitly unattended jobs use:
 
 ```env
 UNATTENDED_PATH_ALLOWLIST=./persona,./temp,./logs
@@ -583,7 +584,7 @@ prevent accidental actions; they do not change provider generation speed.
 - **Human-in-the-loop**  sensitive actions (running shell commands, modifying/deleting files) require your explicit approval.
   > [!IMPORTANT]
   > By default, dangerous actions in live chat pause for dashboard approval.
-  > Scheduled and queued jobs use `UNATTENDED_PATH_ALLOWLIST` /
+  > Scheduled or explicitly unattended jobs use `UNATTENDED_PATH_ALLOWLIST` /
   > `UNATTENDED_COMMAND_ALLOWLIST` instead of forcing `AUTONOMOUS_MODE=true`.
 - **Open Source**  audit the code yourself. No hidden telemetry.
 

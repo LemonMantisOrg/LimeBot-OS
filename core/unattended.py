@@ -1,7 +1,8 @@
-"""Unattended execution policy for scheduled and queued jobs.
+"""Unattended execution policy for scheduled and explicitly unattended jobs.
 
-Live chat stays confirmation-gated. Scheduled / durable jobs may execute
-sensitive tools only when the path or command matches an explicit allowlist.
+Live chat stays confirmation-gated, including after a durable restart. Scheduled
+or explicitly unattended jobs may execute sensitive tools only when the path or
+command matches an explicit allowlist.
 This is not a global autonomous switch.
 """
 
@@ -25,9 +26,7 @@ def is_unattended_turn(msg: Any) -> bool:
         return False
     return bool(
         metadata.get("is_scheduler")
-        or metadata.get("durable")
         or metadata.get("unattended")
-        or metadata.get("durable_job_id")
     )
 
 

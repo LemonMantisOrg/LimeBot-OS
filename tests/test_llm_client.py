@@ -464,6 +464,138 @@ class TestLlmClient(unittest.IsolatedAsyncioTestCase):
             [{"role": "user", "content": "run again"}],
         )
 
+    async def test_gateway_routed_deepseek_drops_legacy_tool_turns_without_reasoning(self):
+        client = LimeLLMClient()
+        provider = ProviderConfig(
+            source_model="openrouter/deepseek/deepseek-v4-flash",
+            model="deepseek/deepseek-v4-flash",
+            base_url="https://openrouter.ai/api/v1",
+            api_key="openrouter-secret",
+            custom_llm_provider="openai",
+            is_codex=False,
+        )
+        request = ChatRequest(
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_legacy_gateway",
+                            "type": "function",
+                            "function": {"name": "browser_navigate", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_legacy_gateway",
+                    "content": "old browser result",
+                },
+                {"role": "user", "content": "continue the recovery"},
+            ]
+        )
+
+        with patch(
+            "core.llm_client.acompletion", new=AsyncMock(return_value=object())
+        ) as mock_completion:
+            await client.complete(provider, request)
+
+        self.assertEqual(
+            mock_completion.await_args.kwargs["messages"],
+            [{"role": "user", "content": "continue the recovery"}],
+        )
+
+    async def test_unprefixed_deepseek_drops_legacy_tool_turns_without_reasoning(self):
+        client = LimeLLMClient()
+        provider = ProviderConfig(
+            source_model="deepseek-v4-flash",
+            model="deepseek-v4-flash",
+            base_url="https://api.deepseek.com",
+            api_key="deepseek-secret",
+            custom_llm_provider="openai",
+            is_codex=False,
+        )
+        request = ChatRequest(
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_legacy_unprefixed",
+                            "type": "function",
+                            "function": {"name": "list_dir", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_legacy_unprefixed",
+                    "content": "old result",
+                },
+                {"role": "user", "content": "continue"},
+            ]
+        )
+
+        with patch(
+            "core.llm_client.acompletion", new=AsyncMock(return_value=object())
+        ) as mock_completion:
+            await client.complete(provider, request)
+
+        self.assertEqual(
+            mock_completion.await_args.kwargs["messages"],
+            [{"role": "user", "content": "continue"}],
+        )
+
+    async def test_reasoning_replay_error_retries_after_evidence_based_cleanup(self):
+        client = LimeLLMClient()
+        provider = ProviderConfig(
+            source_model="gateway/deep-model",
+            model="deep-model",
+            base_url="https://llm.example.test/v1",
+            api_key="gateway-secret",
+            custom_llm_provider="openai",
+            is_codex=False,
+        )
+        request = ChatRequest(
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_provider_error",
+                            "type": "function",
+                            "function": {"name": "list_dir", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_provider_error",
+                    "content": "old result",
+                },
+                {"role": "user", "content": "continue after repair"},
+            ]
+        )
+        provider_error = Exception(
+            "OpenAIException - The reasoning_content in the thinking mode "
+            "must be passed back to the API"
+        )
+
+        with patch(
+            "core.llm_client.acompletion",
+            new=AsyncMock(side_effect=[provider_error, object()]),
+        ) as mock_completion:
+            await client.complete(provider, request)
+
+        self.assertEqual(mock_completion.await_count, 2)
+        self.assertEqual(
+            mock_completion.await_args_list[1].kwargs["messages"],
+            [{"role": "user", "content": "continue after repair"}],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
