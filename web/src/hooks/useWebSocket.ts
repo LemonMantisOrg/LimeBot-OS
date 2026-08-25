@@ -14,6 +14,7 @@ import { API_BASE_URL, WS_BASE_URL } from '@/lib/api';
 import {
     applyUserMessageEdit,
     applyFinalAssistantMessage,
+    applyStreamSnapshot,
     applyStopTyping,
     type ChatAttachment,
     type ChatMessage,
@@ -106,6 +107,11 @@ export function useWebSocket({
     const sessionIdRef = useRef(sessionId);
     const streamFlushTimerRef = useRef<number | null>(null);
     const streamRenderStateRef = useRef<StreamRenderState>(EMPTY_STREAM_RENDER_STATE);
+    // A terminal assistant event closes a stream. WebSocket delivery can
+    // still contain already-queued ephemeral deltas after that event, so keep
+    // a small client-side fence to prevent late chunks from resurrecting the
+    // bubble or toggling the UI back into a live state.
+    const settledStreamKeysRef = useRef<Set<string>>(new Set());
     const streamBufferRef = useRef<{
         chatId: string | null;
         messageId: string | null;
@@ -143,6 +149,28 @@ export function useWebSocket({
         }
     };
 
+    const streamKey = (
+        chatId: string | undefined,
+        messageId: string | undefined,
+        turnId: string | undefined,
+    ) => {
+        if (!chatId || (!messageId && !turnId)) return null;
+        // Prefer the stable assistant message id, falling back to the turn id
+        // for older/partial server events that do not carry both fields.
+        return `${chatId}:${messageId || turnId}`;
+    };
+
+    const rememberSettledStream = (key: string | null) => {
+        if (!key) return;
+        const settled = settledStreamKeysRef.current;
+        settled.add(key);
+        // Turn IDs are unique, but keep the guard bounded for long-lived tabs.
+        if (settled.size > 256) {
+            const oldest = settled.values().next().value;
+            if (oldest) settled.delete(oldest);
+        }
+    };
+
     const flushStreamBuffer = () => {
         clearStreamFlushTimer();
         const pending = streamBufferRef.current;
@@ -172,12 +200,15 @@ export function useWebSocket({
         thinkingDelta = ''
     ) => {
         if (!chatId || chatId !== sessionIdRef.current) return;
+        const key = streamKey(chatId, messageId, turnId);
+        if (key && settledStreamKeysRef.current.has(key)) return;
 
         if (
             streamBufferRef.current.chatId &&
             (
                 streamBufferRef.current.chatId !== chatId ||
-                streamBufferRef.current.messageId !== (messageId || null)
+                streamBufferRef.current.messageId !== (messageId || null) ||
+                streamBufferRef.current.turnId !== (turnId || null)
             )
         ) {
             flushStreamBuffer();
@@ -221,6 +252,7 @@ export function useWebSocket({
         }
         streamBufferRef.current = { chatId: null, messageId: null, turnId: null, content: '', thinking: '' };
         streamRenderStateRef.current = EMPTY_STREAM_RENDER_STATE;
+        settledStreamKeysRef.current.clear();
     }, [sessionId]);
 
     // ── WebSocket connect ─────────────────────────────────────────────────
@@ -293,6 +325,7 @@ export function useWebSocket({
                 clearStreamFlushTimer();
                 streamBufferRef.current = { chatId: null, messageId: null, turnId: null, content: '', thinking: '' };
                 streamRenderStateRef.current = EMPTY_STREAM_RENDER_STATE;
+                settledStreamKeysRef.current.clear();
                 if (!mountedRef.current) {
                     return;
                 }
@@ -349,7 +382,8 @@ export function useWebSocket({
 
                     flushStreamBuffer();
 
-                    if (data.type === 'message' || data.type === 'full_content') {
+                    if (data.type === 'message') {
+                        rememberSettledStream(streamKey(eventChatId, eventMessageId, eventTurnId));
                         setIsTyping(false);
                         let variant: 'default' | 'destructive' | 'warning' = 'default';
                         if (data.metadata?.is_error) variant = 'destructive';
@@ -370,7 +404,23 @@ export function useWebSocket({
                         if (data.metadata?.identity_updated) {
                             onIdentityUpdated();
                         }
+                    } else if (data.type === 'full_content') {
+                        // This is an intermediate replacement snapshot used
+                        // for tool-call sanitization/JSON buffering. The
+                        // actual terminal reply is the later `message` event.
+                        const key = streamKey(eventChatId, eventMessageId, eventTurnId);
+                        if (!key || !settledStreamKeysRef.current.has(key)) {
+                            setIsTyping(true);
+                            setMessages(prev =>
+                                applyStreamSnapshot(prev, {
+                                    messageId: eventMessageId,
+                                    turnId: eventTurnId,
+                                    content: data.content || '',
+                                })
+                            );
+                        }
                     } else if (data.type === 'cancellation' || data.metadata?.is_cancellation) {
+                        rememberSettledStream(streamKey(eventChatId, eventMessageId, eventTurnId));
                         setIsTyping(false);
                         setMessages(prev => prev.map(m => {
                             if (m.type === 'tool' && m.toolExecution?.status === 'running') {

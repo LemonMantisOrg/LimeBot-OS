@@ -94,6 +94,7 @@ contacts.json
 server_diagnostics/
 
 data/vectors/
+data/*.sqlite
 temp/
 limebot.json
 
@@ -112,6 +113,8 @@ plans/*
 # Scratch
 scratch/
 /tmp_*.py
+/.pytest_cache/
+/.pytest-tmp-*/
 
 # Local agent reports and generated web test output
 advisor-plans/

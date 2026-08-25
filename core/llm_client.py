@@ -40,6 +40,16 @@ def _provider_requires_reasoning_none_for_tools(error: Exception) -> bool:
     )
 
 
+def _provider_rejects_tool_choice_in_thinking_mode(error: Exception) -> bool:
+    """Recognize providers that support tools but reject the tool_choice field."""
+    message = str(error).lower()
+    return (
+        "thinking mode" in message
+        and "does not support" in message
+        and "tool_choice" in message
+    )
+
+
 def _bounded_tool_call_id(tool_call_id: Any) -> str:
     """Return a deterministic OpenAI-safe ID without breaking tool-result links."""
     normalized = str(tool_call_id or "")
@@ -83,6 +93,43 @@ def _normalize_openai_tool_call_ids(
         )
 
     return messages
+
+
+def _drop_unreplayable_deepseek_tool_turns(
+    messages: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Remove legacy DeepSeek tool turns whose reasoning trace was not stored.
+
+    DeepSeek requires the complete ``reasoning_content`` for assistant messages
+    that contain tool calls. Older LimeBot history entries were written without
+    that field, so replaying them produces a 400 before the new turn can run.
+    The exact hidden reasoning cannot be reconstructed; dropping only that old
+    assistant/tool exchange lets the current user turn continue safely.
+    """
+    missing_reasoning_call_ids: set[str] = set()
+    repaired: List[Dict[str, Any]] = []
+
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "assistant" and isinstance(
+            message.get("tool_calls"), list
+        ):
+            reasoning = str(message.get("reasoning_content") or "").strip()
+            if not reasoning:
+                for tool_call in message.get("tool_calls") or []:
+                    if isinstance(tool_call, dict) and tool_call.get("id"):
+                        missing_reasoning_call_ids.add(str(tool_call["id"]))
+                continue
+        if (
+            message.get("role") == "tool"
+            and str(message.get("tool_call_id") or "")
+            in missing_reasoning_call_ids
+        ):
+            continue
+        repaired.append(message)
+
+    return repaired
 
 
 def _resolve_local_image_urls(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -212,6 +259,16 @@ class LimeLLMClient:
                 request.tool_choice,
             )
 
+        if provider.source_model.lower().startswith("deepseek/"):
+            repaired_messages = _drop_unreplayable_deepseek_tool_turns(messages)
+            if len(repaired_messages) != len(messages):
+                logger.warning(
+                    "Removed legacy DeepSeek tool history without reasoning_content "
+                    "before replaying %s.",
+                    provider.source_model,
+                )
+                messages = repaired_messages
+
         messages = _normalize_openai_tool_call_ids(messages)
 
         if acompletion is None:
@@ -228,7 +285,12 @@ class LimeLLMClient:
 
         if request.tools:
             kwargs["tools"] = request.tools
-            if request.tool_choice is not None:
+            # DeepSeek V4 thinking mode supports tool calls but rejects the
+            # OpenAI-compatible tool_choice parameter, including "auto".
+            # The prompt and tool schemas still give the model the required
+            # context; forcing a choice is not available on this endpoint.
+            deepseek_thinking = provider.source_model.lower().startswith("deepseek/")
+            if request.tool_choice is not None and not deepseek_thinking:
                 kwargs["tool_choice"] = request.tool_choice
         if request.stream:
             kwargs["stream_options"] = {"include_usage": True}
@@ -238,6 +300,15 @@ class LimeLLMClient:
         try:
             return await acompletion(**kwargs)
         except Exception as exc:
+            if request.tools and _provider_rejects_tool_choice_in_thinking_mode(exc):
+                compatibility_kwargs = dict(kwargs)
+                compatibility_kwargs.pop("tool_choice", None)
+                logger.warning(
+                    "Provider rejected tool_choice in thinking mode for %s; "
+                    "retrying without tool_choice.",
+                    provider.source_model,
+                )
+                return await acompletion(**compatibility_kwargs)
             if not request.tools or not _provider_requires_reasoning_none_for_tools(exc):
                 raise
 

@@ -73,6 +73,19 @@ from core.events import InboundMessage, OutboundMessage
 from core.llm_client import ChatRequest, LimeLLMClient, ProviderConfig
 from core.managed_tasks import ManagedTaskRegistry
 from core.job_queue import FAILED, SUCCEEDED, get_job_queue
+from core.recovery_controller import RecoveryState, classify_failure
+from core.task_runs import (
+    ACTIVE_STATES as TASK_RUN_ACTIVE_STATES,
+    BLOCKED as TASK_RUN_BLOCKED,
+    COMPLETED as TASK_RUN_COMPLETED,
+    EXECUTING as TASK_RUN_EXECUTING,
+    PLANNING as TASK_RUN_PLANNING,
+    REPAIRING as TASK_RUN_REPAIRING,
+    RETRYING as TASK_RUN_RETRYING,
+    VERIFYING as TASK_RUN_VERIFYING,
+    get_task_run_store,
+    is_coding_goal,
+)
 from core.unattended import evaluate_unattended_tool, is_unattended_turn
 from core import prompt as prompt_module
 from core.metrics import MetricsCollector
@@ -183,6 +196,8 @@ class ToolOutcome:
     diagnostic_tail: str
     verification_status: Optional[str] = None
     verification_detail: str = ""
+    failure_category: str = "unknown"
+    progress: bool = False
 
 _CASUAL_WORDS = frozenset(
     {
@@ -349,6 +364,7 @@ class AgentLoop:
         # lifecycle operations use this registry as the source of truth.
         self.task_registry = ManagedTaskRegistry()
         self.job_queue = get_job_queue()
+        self.task_runs = get_task_run_store()
         self._queue_worker_id = uuid.uuid4().hex
         # Background subagents are durable TaskTracker records plus live
         # asyncio handles. The handle map is intentionally separate from
@@ -357,6 +373,7 @@ class AgentLoop:
         self.background_subagent_sessions: Dict[str, str] = {}
         self.background_subagent_parents: Dict[str, str] = {}
         self.background_subagent_results: Dict[str, str] = {}
+        self._recovery_states: Dict[str, RecoveryState] = {}
 
         self._history_dirty: Dict[str, bool] = {}
 
@@ -2510,13 +2527,38 @@ class AgentLoop:
 
     @staticmethod
     def _unpack_stream_result(result) -> tuple:
-        """Unpack _consume_stream result into content, calls, usage, web-streamed, discord-streamed."""
+        """Unpack the legacy five-field stream result for existing callers."""
+        if isinstance(result, tuple) and len(result) >= 6:
+            return (
+                result[0],
+                result[1],
+                result[2],
+                result[3],
+                result[4],
+            )
         if isinstance(result, tuple) and len(result) >= 5:
             return result[0], result[1], result[2], result[3], result[4]
         if isinstance(result, tuple) and len(result) >= 4:
             return result[0], result[1], result[2], result[3], False
         content, tool_calls, usage = result
         return content, tool_calls, usage, False, False
+
+    @staticmethod
+    def _unpack_stream_result_with_reasoning(result) -> tuple:
+        """Unpack stream output including provider reasoning content."""
+        if isinstance(result, tuple) and len(result) >= 6:
+            return (
+                result[0],
+                result[1],
+                result[2],
+                result[3],
+                result[4],
+                result[5],
+            )
+        content, tool_calls, usage, streamed_to_web, streamed_to_discord = (
+            AgentLoop._unpack_stream_result(result)
+        )
+        return content, tool_calls, usage, streamed_to_web, streamed_to_discord, ""
 
     # ── Overlap deduplication ────────────────────────────────────────────
 
@@ -2729,6 +2771,47 @@ class AgentLoop:
         """
         from core.task_tracker import get_task_tracker
 
+        metadata = dict(msg.metadata or {})
+        if not metadata.get("task_run_id"):
+            followup_words = re.compile(
+                r"\b(continue|again|retry|re-?try|fix|correct|use|proceed|"
+                r"do it|try that|corrige|arregla|intenta|continua|de nuevo|hazlo)\b",
+                re.IGNORECASE,
+            )
+            task_run_store = getattr(self, "task_runs", None)
+            active_runs = (
+                task_run_store.list_runs(
+                    statuses=TASK_RUN_ACTIVE_STATES, limit=100
+                )
+                if task_run_store is not None
+                else []
+            )
+            matching = [
+                run
+                for run in active_runs
+                if str((run.metadata or {}).get("session_key") or "")
+                == msg.session_key
+            ]
+            if matching and (
+                bool(metadata.get("reply_to_task_run"))
+                or bool(followup_words.search(msg.content or ""))
+            ):
+                metadata["task_run_id"] = matching[0].run_id
+                metadata["task_run_followup"] = True
+                msg.metadata = metadata
+                durable_id = str(
+                    (matching[0].metadata or {}).get("durable_job_id") or ""
+                ).strip()
+                queue = getattr(self, "job_queue", None)
+                if durable_id and queue is not None:
+                    queue.update_payload_metadata(
+                        durable_id,
+                        {
+                            "task_run_id": matching[0].run_id,
+                            "task_run_followup": True,
+                        },
+                    )
+
         durable_job_id = (
             msg.metadata.get("durable_job_id")
             if isinstance(msg.metadata, dict)
@@ -2872,6 +2955,8 @@ class AgentLoop:
                 TaskStatus.COMPLETED.value,
                 TaskStatus.FAILED.value,
                 TaskStatus.CANCELLED.value,
+                TaskStatus.RETRYING.value,
+                TaskStatus.WAITING.value,
             }:
                 current = asyncio.current_task()
                 status = (
@@ -2881,15 +2966,26 @@ class AgentLoop:
                     else TaskStatus.COMPLETED.value
                 )
                 await tracker.update_task(task_id, status=status)
+            registry_status = status
+            if registry_status not in {
+                TaskStatus.COMPLETED.value,
+                TaskStatus.FAILED.value,
+                TaskStatus.CANCELLED.value,
+            }:
+                registry_status = TaskStatus.COMPLETED.value
             await registry.finalize(
                 task_id,
-                status,
+                registry_status,
                 error=(tracked.error if tracked is not None else None),
             )
             if heartbeat_task is not None:
                 heartbeat_task.cancel()
                 await asyncio.gather(heartbeat_task, return_exceptions=True)
-            if durable_job_id and queue is not None:
+            continuation_scheduled = bool(
+                isinstance(getattr(msg, "metadata", None), dict)
+                and msg.metadata.get("task_run_continuation_scheduled")
+            )
+            if durable_job_id and queue is not None and not continuation_scheduled:
                 error_text = tracked.error if tracked is not None else None
                 if status == TaskStatus.COMPLETED.value:
                     finished = queue.finish(str(durable_job_id), SUCCEEDED)
@@ -3326,6 +3422,22 @@ class AgentLoop:
                     "tool": conf.get("tool"),
                 },
             )
+            cancelled_any = True
+
+        for run in self.task_runs.list_runs(
+            statuses=TASK_RUN_ACTIVE_STATES, limit=500
+        ):
+            run_session = str((run.metadata or {}).get("session_key") or "")
+            if run_session not in related_sessions:
+                continue
+            self.task_runs.cancel(run.run_id, reason="User cancelled the task.")
+            durable_id = str(
+                (run.metadata or {}).get("durable_job_id") or ""
+            ).strip()
+            if durable_id:
+                self.job_queue.finish(
+                    durable_id, "cancelled", "User cancelled the task."
+                )
             cancelled_any = True
 
         for sk, t in list(self.active_tasks.items()):
@@ -5160,6 +5272,16 @@ class AgentLoop:
         diagnostic_limit = 800
         diagnostic = truncate_tool_result(redact_sensitive_text(text), diagnostic_limit)
         split = diagnostic.split("\n... [truncated diagnostic] ...\n", 1)
+        failure_category = "" if success else classify_failure(function_name, text)
+        progress = success and function_name in {
+            "edit_file",
+            "write_file",
+            "edit_skill",
+            "create_skill",
+            "verify_files",
+            "diagnose_files",
+            "run_command",
+        }
         return ToolOutcome(
             tool=function_name,
             success=success,
@@ -5172,7 +5294,212 @@ class AgentLoop:
             diagnostic_tail=(split[1] if len(split) == 2 else split[0])[-400:],
             verification_status=verification_status,
             verification_detail=verification_detail,
+            failure_category=failure_category or "unknown",
+            progress=progress,
         )
+
+    def _recovery_tool_definitions(
+        self,
+        initial: Optional[List[Dict[str, Any]]],
+        state: Optional[RecoveryState],
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Rebuild a recovery catalog from the exact registered tool names."""
+        if state is None or not state.active:
+            return initial
+        all_tools = self._get_tool_definitions()
+        by_name = {
+            str(tool.get("function", {}).get("name") or ""): tool
+            for tool in all_tools
+            if isinstance(tool, dict)
+        }
+        allowed = state.allowed_tool_names(by_name.keys())
+        ordered: List[Dict[str, Any]] = []
+        seen: Set[str] = set()
+        for tool in list(initial or []) + all_tools:
+            name = str(tool.get("function", {}).get("name") or "")
+            if name in allowed and name not in seen:
+                ordered.append(by_name[name])
+                seen.add(name)
+        self._log_tool_debug(
+            "recovery_tool_catalog_rebuilt",
+            failed_tool=state.failed_tool,
+            failure_category=state.failure_category,
+            tools=sorted(seen),
+        )
+        return ordered
+
+    @staticmethod
+    def _task_run_acceptance_satisfied(
+        run: Any,
+        outcomes: List[ToolOutcome],
+        *,
+        coding_turn: bool,
+        iterations_limit_reached: bool,
+        unresolved_tool_failure: bool,
+    ) -> bool:
+        if iterations_limit_reached or unresolved_tool_failure:
+            return False
+        if not outcomes:
+            checkpoint = getattr(run, "checkpoint", {}) or {}
+            return not is_coding_goal(getattr(run, "goal", "")) or checkpoint.get(
+                "verification_state"
+            ) == "passed"
+        if not is_coding_goal(getattr(run, "goal", "")):
+            return True
+        verification_tools = {"verify_files", "diagnose_files"}
+        verified = any(
+            item.success
+            and (
+                item.tool in verification_tools
+                or (
+                    item.tool == "run_command"
+                    and item.verification_status in {"passed", "success", "completed", "ok"}
+                )
+            )
+            for item in outcomes
+        )
+        return verified if coding_turn or is_coding_goal(getattr(run, "goal", "")) else True
+
+    def _task_run_resume_instruction(self, run: Any) -> str:
+        criteria = "\n".join(f"- {item}" for item in run.acceptance_criteria)
+        checkpoint = json.dumps(run.checkpoint or {}, ensure_ascii=False, default=str)[:2500]
+        return (
+            "DURABLE TASK CONTINUATION. Continue the original task; this is not a new request.\n"
+            f"Task ID: {run.run_id}\n"
+            f"Original goal: {run.goal}\n"
+            f"Current phase: {run.phase}\n"
+            f"Next action: {run.next_action or 'Inspect the latest evidence and continue.'}\n"
+            "Acceptance criteria:\n"
+            f"{criteria}\n"
+            f"Last checkpoint: {checkpoint}\n"
+            f"Last error: {run.last_error or '(none)'}\n"
+            "Do not repeat completed side effects. Inspect the latest result first, use the exact "
+            "available tool names, make one justified correction, and verify the original goal "
+            "before reporting completion."
+        )
+
+    def _recovery_tool_contract(self, state: Optional[RecoveryState]) -> str:
+        if state is None or not state.active:
+            return ""
+        definitions = self._get_tool_definitions()
+        names = sorted(
+            state.allowed_tool_names(
+                str(item.get("function", {}).get("name") or "")
+                for item in definitions
+                if isinstance(item, dict)
+            )
+        )
+        exact = ", ".join(names) or "(no recovery tools are currently available)"
+        return (
+            "RECOVERY TOOL CONTRACT. Use only these exact registered tool names; do not invent "
+            f"aliases or wrapper names: {exact}. Inspect the source/schema before retrying an "
+            "invalid-argument failure, and do not repeat an identical failed action without new evidence."
+        )
+
+    async def _schedule_task_run_continuation(
+        self,
+        run: Any,
+        msg: InboundMessage,
+        *,
+        next_action: str,
+        phase: str,
+        error: str = "",
+        corrective_failure: bool = False,
+        recovery: Optional[RecoveryState] = None,
+    ) -> bool:
+        """Persist and enqueue one bounded continuation slice."""
+        if run is None or run.terminal:
+            return False
+        if run.slice_count >= run.max_slices:
+            self.task_runs.block(
+                run.run_id,
+                error="Task continuation limit reached without verified completion.",
+                next_action="Review the last checkpoint and continue explicitly.",
+            )
+            return False
+        if recovery is not None and not recovery.can_continue():
+            self.task_runs.block(
+                run.run_id,
+                error=error or "Corrective recovery budget exhausted.",
+                next_action="Review the diagnostic and provide a new direction or credential.",
+            )
+            return False
+        checkpoint = dict(run.checkpoint or {})
+        if recovery is not None:
+            checkpoint["recovery"] = recovery.to_dict()
+        updated = self.task_runs.request_resume(
+            run.run_id,
+            phase=phase,
+            next_action=next_action,
+            error=error,
+            corrective_failure=corrective_failure,
+            checkpoint=checkpoint,
+            metadata_update={"continuation_requested": True},
+        )
+        if updated is None:
+            return False
+        self._log_session_event(
+            str((updated.metadata or {}).get("session_key") or msg.session_key),
+            {
+                "type": "task_run_checkpoint",
+                "task_run_id": updated.run_id,
+                "status": updated.status,
+                "phase": updated.phase,
+                "slice_count": updated.slice_count,
+                "corrective_failures": updated.corrective_failures,
+                "next_action": updated.next_action[:500],
+                "last_error": redact_sensitive_text(updated.last_error[:500]),
+            },
+        )
+
+        metadata = dict(msg.metadata or {})
+        metadata.update(
+            {
+                "task_run_id": run.run_id,
+                "task_run_resume": True,
+                "task_run_continuation_scheduled": True,
+            }
+        )
+        durable_id = str(metadata.get("durable_job_id") or "").strip()
+        resume_msg = InboundMessage(
+            channel=msg.channel,
+            sender_id=msg.sender_id,
+            chat_id=msg.chat_id,
+            content=msg.content,
+            media=list(msg.media or []),
+            metadata=metadata,
+        )
+        msg.metadata.update({"task_run_continuation_scheduled": True})
+        if durable_id:
+            self.job_queue.update_payload_metadata(
+                durable_id,
+                {
+                    "task_run_id": run.run_id,
+                    "task_run_resume": True,
+                },
+            )
+            self.job_queue.requeue_continuation(
+                durable_id,
+                delay=0.15,
+                error=error or "Continuing durable task from checkpoint.",
+            )
+        else:
+            metadata["durable_job_id"] = run.run_id
+            resume_msg.metadata = metadata
+            self.job_queue.enqueue(
+                resume_msg,
+                kind="task_continuation",
+                job_id=run.run_id,
+                max_attempts=1,
+            )
+        await self.bus.publish_inbound(resume_msg)
+        await self._publish_activity(
+            msg,
+            f"Continuing task from checkpoint: {next_action}",
+            turn_id=None,
+            message_id=None,
+        )
+        return True
 
     async def _emit_coding_phase(
         self,
@@ -5202,6 +5529,8 @@ class AgentLoop:
                 "diagnostic_tail": outcome.diagnostic_tail,
                 "verification_status": outcome.verification_status,
                 "verification_detail": outcome.verification_detail,
+                "failure_category": outcome.failure_category,
+                "progress": outcome.progress,
             }
             payload["outcome"] = details
             event["outcome"] = details
@@ -5793,6 +6122,7 @@ class AgentLoop:
         message_id: Optional[str] = None,
         coding_turn: bool = False,
         on_progress_queued: Optional[Callable[[str], None]] = None,
+        recovery_state: Optional[RecoveryState] = None,
     ) -> bool:
         """Run reads concurrently, but keep stateful steps in causal model order."""
         any_blocked = False
@@ -5838,6 +6168,18 @@ class AgentLoop:
                 tc_id, function_name, function_args = self._parse_tool_call(
                     tool_call, session_key
                 )
+
+                if recovery_state is not None:
+                    gated = recovery_state.gate(function_name, function_args)
+                    if gated:
+                        return (
+                            tc_id,
+                            function_name,
+                            function_args,
+                            f"Error: {gated}",
+                            False,
+                            is_internal,
+                        )
 
                 if coding_turn:
                     await self._emit_coding_phase(
@@ -6195,6 +6537,8 @@ class AgentLoop:
                 self._last_tool_outcomes.append(
                     self._build_tool_outcome(fail_name, failure_result)
                 )
+                if recovery_state is not None:
+                    recovery_state.observe(self._last_tool_outcomes[-1], fail_args)
                 self.history[session_key].append(
                     {
                         "role": "tool",
@@ -6218,6 +6562,8 @@ class AgentLoop:
 
             outcome_details = self._build_tool_outcome(function_name, result)
             self._last_tool_outcomes.append(outcome_details)
+            if recovery_state is not None:
+                recovery_state.observe(outcome_details, function_args)
             if coding_turn:
                 await self._emit_coding_phase(
                     self._tool_phase(function_name, function_args),
@@ -7292,7 +7638,14 @@ class AgentLoop:
             usage=str(usage) if usage else "",
         )
 
-        return full_content, tool_calls, usage, streamed_to_web, streamed_to_discord
+        return (
+            full_content,
+            tool_calls,
+            usage,
+            streamed_to_web,
+            streamed_to_discord,
+            thinking_buffer,
+        )
 
     async def _process_message(
         self, msg: InboundMessage, _task_id: Optional[str] = None
@@ -7306,6 +7659,23 @@ class AgentLoop:
         tool_batch_blocked = False
         unresolved_tool_failure = False
         unresolved_failure_detail = ""
+        task_run = None
+        task_run_id = ""
+        task_run_resume = bool(
+            isinstance(getattr(msg, "metadata", None), dict)
+            and (
+                msg.metadata.get("task_run_resume")
+                or msg.metadata.get("task_run_followup")
+            )
+        )
+        task_run_continuation_scheduled = False
+        task_run_progress_reply = ""
+        iterations_limit_reached = False
+        coding_turn = False
+        all_tool_outcomes: List[ToolOutcome] = []
+        recovery_state: Optional[RecoveryState] = None
+        recovery_blocked: Optional[str] = None
+        recovery_required = False
 
         def make_output_queued_recorder(
             iteration_kind: str, iteration: int
@@ -7359,6 +7729,75 @@ class AgentLoop:
                 )
                 task_context_token = _CURRENT_TASK_ID.set(_msg_task_id)
                 await _tracker.update_task(_msg_task_id, status="running")
+
+            durable_id = str(
+                (msg.metadata or {}).get("task_run_id")
+                or (msg.metadata or {}).get("durable_job_id")
+                or _msg_task_id
+                or uuid.uuid4().hex
+            ).strip()
+            task_run_id = durable_id
+            try:
+                task_run_max_slices = max(
+                    1, int(os.getenv("TASK_RUN_MAX_SLICES", "20") or 20)
+                )
+            except (TypeError, ValueError):
+                task_run_max_slices = 20
+            try:
+                task_run_max_corrective_failures = max(
+                    1,
+                    int(
+                        os.getenv(
+                            "TOOL_RECOVERY_MAX_CORRECTIVE_FAILURES", "5"
+                        )
+                        or 5
+                    ),
+                )
+            except (TypeError, ValueError):
+                task_run_max_corrective_failures = 5
+            task_run = self.task_runs.create_or_get(
+                task_run_id,
+                msg.content or "",
+                session_key=session_key,
+                workspace_id=str((msg.metadata or {}).get("workspace_id") or ""),
+                provider=str(self.model or ""),
+                metadata={
+                    "channel": msg.channel,
+                    "chat_id": msg.chat_id,
+                    "sender_id": msg.sender_id,
+                    "durable_job_id": str((msg.metadata or {}).get("durable_job_id") or ""),
+                },
+                max_slices=task_run_max_slices,
+                max_corrective_failures=task_run_max_corrective_failures,
+            )
+            if not task_run_resume and task_run.status in {
+                "running",
+                "planning",
+                "executing",
+                "verifying",
+                "repairing",
+                "retrying",
+            }:
+                # A durable job can be replayed after a process crash before
+                # its continuation metadata reaches the inbound payload.
+                task_run_resume = True
+            recovery_state = RecoveryState.from_dict(
+                (task_run.checkpoint or {}).get("recovery"), task_run.goal
+            )
+            if task_run_resume and task_run.resumable:
+                task_run = self.task_runs.start(task_run.run_id, phase=task_run.phase)
+            elif not task_run_resume and task_run.status == "queued":
+                task_run = self.task_runs.start(task_run.run_id, phase=TASK_RUN_PLANNING)
+            if task_run is not None:
+                await _tracker.update_task(
+                    _msg_task_id,
+                    metadata_update={
+                        "task_run_id": task_run.run_id,
+                        "task_run_phase": task_run.phase,
+                        "task_run_status": task_run.status,
+                        "acceptance_criteria": task_run.acceptance_criteria,
+                    },
+                )
 
             content = msg.content or ""
             attachments = [
@@ -7421,6 +7860,12 @@ class AgentLoop:
                         ),
                     )
                 )
+                if task_run is not None:
+                    self.task_runs.complete(
+                        task_run.run_id,
+                        result="Background reflection complete.",
+                        checkpoint={**dict(task_run.checkpoint or {}), "maintenance": True},
+                    )
                 return
 
             if (
@@ -7428,6 +7873,12 @@ class AgentLoop:
                 and not msg.metadata.get("is_dm")
                 and msg.channel == "discord"
             ):
+                if task_run is not None:
+                    self.task_runs.complete(
+                        task_run.run_id,
+                        result="Ignored ambient Discord message.",
+                        checkpoint={**dict(task_run.checkpoint or {}), "ignored": True},
+                    )
                 return
 
             if not (
@@ -7468,6 +7919,12 @@ class AgentLoop:
                             ),
                         )
                     )
+                    if task_run is not None:
+                        self.task_runs.block(
+                            task_run.run_id,
+                            error=failure_code,
+                            next_action="Retry after required capabilities are ready.",
+                        )
                     return
 
             sender_id = msg.sender_id
@@ -7495,6 +7952,12 @@ class AgentLoop:
                         ),
                     )
                 )
+                if task_run is not None:
+                    self.task_runs.block(
+                        task_run.run_id,
+                        error="Requested skill invocation could not be resolved.",
+                        next_action="Use a registered skill name or ask LimeBot to list skills.",
+                    )
                 return
             normalized = content.strip().lower()
             is_stop_request = normalized in _DENY_WORDS or any(
@@ -7529,6 +7992,12 @@ class AgentLoop:
                             )
                         else:
                             logger.debug("♻️ Skipping identical duplicate message.")
+                        if task_run is not None:
+                            self.task_runs.complete(
+                                task_run.run_id,
+                                result="Duplicate message ignored.",
+                                checkpoint={**dict(task_run.checkpoint or {}), "deduplicated": True},
+                            )
                         return
                 self._last_msg_hash[session_key] = (msg_hash, now_ts)
 
@@ -7553,6 +8022,10 @@ class AgentLoop:
                                 ),
                             )
                         )
+                        if task_run is not None:
+                            self.task_runs.cancel(
+                                task_run.run_id, reason="User cancelled the task."
+                            )
                         return
 
                 pending_for_session = [
@@ -7591,6 +8064,15 @@ class AgentLoop:
                                 ),
                             )
                         )
+                        if task_run is not None:
+                            self.task_runs.complete(
+                                task_run.run_id,
+                                result=reply_text,
+                                checkpoint={
+                                    **dict(task_run.checkpoint or {}),
+                                    "control_message": True,
+                                },
+                            )
                         return
 
             attachment_summary = self._build_attachment_summary(attachments)
@@ -7894,29 +8376,30 @@ class AgentLoop:
                             if image_urls
                             else user_text_payload
                         )
-                    self.history[session_key].append(
-                        {"role": "user", "content": user_msg_content}
-                    )
-                    self._mark_dirty(session_key)
-
-                    asyncio.create_task(
-                        self.session_manager.append_chat_log(
-                            session_key,
-                            {
-                                "role": "user",
-                                "content": msg.content or "",
-                                "message_id": str(msg.metadata.get("message_id") or "").strip() or None,
-                                "client_message_id": str(msg.metadata.get("client_message_id") or "").strip() or None,
-                                "edited_from_message_id": str(msg.metadata.get("edited_from_message_id") or "").strip() or None,
-                                "image": bool(image_urls),
-                                "images": len(image_urls),
-                                "attachments": [
-                                    str(attachment.get("name") or "attachment")
-                                    for attachment in attachments
-                                ],
-                            },
+                    if not task_run_resume:
+                        self.history[session_key].append(
+                            {"role": "user", "content": user_msg_content}
                         )
-                    )
+                        self._mark_dirty(session_key)
+
+                        asyncio.create_task(
+                            self.session_manager.append_chat_log(
+                                session_key,
+                                {
+                                    "role": "user",
+                                    "content": msg.content or "",
+                                    "message_id": str(msg.metadata.get("message_id") or "").strip() or None,
+                                    "client_message_id": str(msg.metadata.get("client_message_id") or "").strip() or None,
+                                    "edited_from_message_id": str(msg.metadata.get("edited_from_message_id") or "").strip() or None,
+                                    "image": bool(image_urls),
+                                    "images": len(image_urls),
+                                    "attachments": [
+                                        str(attachment.get("name") or "attachment")
+                                        for attachment in attachments
+                                    ],
+                                },
+                            )
+                        )
 
                     injected = [
                         "SOUL.md",
@@ -8017,6 +8500,15 @@ class AgentLoop:
                                 ),
                             )
                         )
+                        if task_run is not None:
+                            self.task_runs.complete(
+                                task_run.run_id,
+                                result=reply_to_user,
+                                checkpoint={
+                                    **dict(task_run.checkpoint or {}),
+                                    "delegated_subagent": True,
+                                },
+                            )
                         return
 
                     await self._trim_history(session_key)
@@ -8045,6 +8537,9 @@ class AgentLoop:
                             content,
                             forced_skill_name=forced_skill_name,
                             session_key=session_key,
+                        )
+                        initial_tool_definitions = self._recovery_tool_definitions(
+                            initial_tool_definitions, recovery_state
                         )
                         self._record_stage_timing(
                             session_key,
@@ -8075,6 +8570,32 @@ class AgentLoop:
                         "what still needs inspection instead of claiming an edit was made."
                     )
                     initial_messages = self.history[session_key]
+                    if task_run is not None:
+                        if task_run_resume:
+                            task_run_instruction = self._task_run_resume_instruction(task_run)
+                            if msg.metadata.get("task_run_followup"):
+                                task_run_instruction += (
+                                    "\nUser follow-up correction to apply now: "
+                                    + str(msg.content or "")[:2000]
+                                )
+                        else:
+                            criteria = "\n".join(
+                                f"- {item}" for item in task_run.acceptance_criteria
+                            )
+                            task_run_instruction = (
+                                "TASK COMPLETION CONTRACT. Work toward the original request and "
+                                "do not claim completion from a plan or intention alone. Verify "
+                                "state-changing work before reporting success. Acceptance criteria:\n"
+                                f"{criteria}"
+                            )
+                        initial_messages = initial_messages + [
+                            {"role": "system", "content": task_run_instruction}
+                        ]
+                    recovery_contract = self._recovery_tool_contract(recovery_state)
+                    if recovery_contract:
+                        initial_messages = initial_messages + [
+                            {"role": "system", "content": recovery_contract}
+                        ]
                     if plan_mode:
                         initial_messages = initial_messages + [
                             {"role": "system", "content": plan_instruction}
@@ -8121,8 +8642,9 @@ class AgentLoop:
                         _,
                         streamed_to_web,
                         streamed_to_discord,
+                        reasoning_content,
                     ) = (
-                        self._unpack_stream_result(consume_result)
+                        self._unpack_stream_result_with_reasoning(consume_result)
                     )
                     self._record_stage_timing(
                         session_key,
@@ -8138,10 +8660,12 @@ class AgentLoop:
                     any_tool_calls_in_turn = bool(tool_calls)
                     fallback_inserted = False
 
-                    if full_content or tool_calls:
+                    if full_content or tool_calls or reasoning_content:
                         am: Dict = {"role": "assistant", "content": full_content or ""}
                         if tool_calls:
                             am["tool_calls"] = tool_calls
+                        if reasoning_content:
+                            am["reasoning_content"] = reasoning_content
                         self.history[session_key].append(am)
                         self._mark_dirty(session_key)
 
@@ -8215,6 +8739,7 @@ class AgentLoop:
                             message_id=assistant_message_id,
                             coding_turn=coding_turn,
                             on_progress_queued=active_output_queued,
+                            recovery_state=recovery_state,
                         )
                         tool_batch_duration_s += time.perf_counter() - tool_batch_started
                         tool_batch_count += 1
@@ -8225,6 +8750,32 @@ class AgentLoop:
                             for outcome in getattr(self, "_last_tool_outcomes", [])
                             if not outcome.success
                         ]
+                        all_tool_outcomes.extend(
+                            list(getattr(self, "_last_tool_outcomes", []))
+                        )
+                        if task_run is not None and recovery_state is not None:
+                            task_run = self.task_runs.checkpoint(
+                                task_run.run_id,
+                                phase=(
+                                    TASK_RUN_REPAIRING
+                                    if batch_failures
+                                    else TASK_RUN_EXECUTING
+                                ),
+                                status="running",
+                                checkpoint={
+                                    **dict(task_run.checkpoint or {}),
+                                    "recovery": recovery_state.to_dict(),
+                                    "last_tools": [
+                                        {
+                                            "tool": item.tool,
+                                            "success": item.success,
+                                            "failure_category": item.failure_category,
+                                            "verification_status": item.verification_status,
+                                        }
+                                        for item in getattr(self, "_last_tool_outcomes", [])
+                                    ],
+                                },
+                            ) or task_run
                         unresolved_tool_failure = bool(batch_failures)
                         if batch_failures:
                             unresolved_failure_detail = batch_failures[-1].diagnostic_tail
@@ -8309,7 +8860,7 @@ class AgentLoop:
                                             iteration=iteration,
                                             on_output_queued=active_output_queued,
                                         )
-                                        synthesis_content, _, _, _, _ = self._unpack_stream_result(
+                                        synthesis_content, _, _, _, _, _ = self._unpack_stream_result_with_reasoning(
                                             synthesis_result
                                         )
                                         raw_reply = str(synthesis_content or "").strip()
@@ -8340,7 +8891,14 @@ class AgentLoop:
                                     session_key
                                 )
                                 post_tool_messages = normalized_history
-                                post_tool_definitions = initial_tool_definitions
+                                post_tool_definitions = self._recovery_tool_definitions(
+                                    initial_tool_definitions, recovery_state
+                                )
+                                recovery_contract = self._recovery_tool_contract(recovery_state)
+                                if recovery_contract:
+                                    post_tool_messages = post_tool_messages + [
+                                        {"role": "system", "content": recovery_contract}
+                                    ]
                                 if (
                                     artifact_requested
                                     and (
@@ -8407,8 +8965,9 @@ class AgentLoop:
                                     _,
                                     nxt_streamed_to_web,
                                     nxt_streamed_to_discord,
+                                    nxt_reasoning_content,
                                 ) = (
-                                    self._unpack_stream_result(nxt_consume_result)
+                                    self._unpack_stream_result_with_reasoning(nxt_consume_result)
                                 )
                                 web_streamed_reply = web_streamed_reply or bool(
                                     nxt_streamed_to_web
@@ -8440,12 +8999,15 @@ class AgentLoop:
 
                                 if not nxt_tool_calls:
                                     raw_reply = accumulated_content
-                                    self.history[session_key].append(
-                                        {
-                                            "role": "assistant",
-                                            "content": nxt_content,
-                                        }
-                                    )
+                                    next_assistant_message: Dict[str, Any] = {
+                                        "role": "assistant",
+                                        "content": nxt_content,
+                                    }
+                                    if nxt_reasoning_content:
+                                        next_assistant_message[
+                                            "reasoning_content"
+                                        ] = nxt_reasoning_content
+                                    self.history[session_key].append(next_assistant_message)
                                     self._mark_dirty(session_key)
                                     break
 
@@ -8454,6 +9016,8 @@ class AgentLoop:
                                     "content": nxt_content or "",
                                 }
                                 nxt_am["tool_calls"] = nxt_tool_calls
+                                if nxt_reasoning_content:
+                                    nxt_am["reasoning_content"] = nxt_reasoning_content
                                 self.history[session_key].append(nxt_am)
                                 self._mark_dirty(session_key)
 
@@ -8473,6 +9037,7 @@ class AgentLoop:
                                     message_id=assistant_message_id,
                                     coding_turn=coding_turn,
                                     on_progress_queued=active_output_queued,
+                                    recovery_state=recovery_state,
                                 )
                                 tool_batch_duration_s += (
                                     time.perf_counter() - tool_batch_started
@@ -8485,6 +9050,32 @@ class AgentLoop:
                                     for outcome in getattr(self, "_last_tool_outcomes", [])
                                     if not outcome.success
                                 ]
+                                all_tool_outcomes.extend(
+                                    list(getattr(self, "_last_tool_outcomes", []))
+                                )
+                                if task_run is not None and recovery_state is not None:
+                                    task_run = self.task_runs.checkpoint(
+                                        task_run.run_id,
+                                        phase=(
+                                            TASK_RUN_REPAIRING
+                                            if batch_failures
+                                            else TASK_RUN_EXECUTING
+                                        ),
+                                        status="running",
+                                        checkpoint={
+                                            **dict(task_run.checkpoint or {}),
+                                            "recovery": recovery_state.to_dict(),
+                                            "last_tools": [
+                                                {
+                                                    "tool": item.tool,
+                                                    "success": item.success,
+                                                    "failure_category": item.failure_category,
+                                                    "verification_status": item.verification_status,
+                                                }
+                                                for item in getattr(self, "_last_tool_outcomes", [])
+                                            ],
+                                        },
+                                    ) or task_run
                                 unresolved_tool_failure = bool(batch_failures)
                                 if batch_failures:
                                     unresolved_failure_detail = batch_failures[-1].diagnostic_tail
@@ -8533,6 +9124,82 @@ class AgentLoop:
                     else:
                         raw_reply = full_content
 
+                    if task_run is not None:
+                        accepted = bool(plan_mode) or self._task_run_acceptance_satisfied(
+                            task_run,
+                            all_tool_outcomes,
+                            coding_turn=coding_turn,
+                            iterations_limit_reached=iterations_limit_reached,
+                            unresolved_tool_failure=unresolved_tool_failure,
+                        )
+                        verified = any(
+                            outcome.success
+                            and outcome.tool in {"verify_files", "diagnose_files"}
+                            for outcome in all_tool_outcomes
+                        )
+                        if verified:
+                            task_run.checkpoint["verification_state"] = "passed"
+                        if accepted:
+                            if recovery_state is not None and recovery_state.active:
+                                recovery_state.resolve()
+                            task_run = self.task_runs.complete(
+                                task_run.run_id,
+                                result=str(raw_reply or ""),
+                                checkpoint={
+                                    **dict(task_run.checkpoint or {}),
+                                    "recovery": recovery_state.to_dict()
+                                    if recovery_state is not None
+                                    else {},
+                                    "verification_state": "passed"
+                                    if verified or not is_coding_goal(task_run.goal)
+                                    else task_run.checkpoint.get("verification_state"),
+                                },
+                            ) or task_run
+                        else:
+                            hard_category = (
+                                recovery_state.failure_category
+                                if recovery_state is not None
+                                else ""
+                            )
+                            hard_blocker = hard_category in {
+                                "authentication",
+                                "permission_policy",
+                                "cancellation",
+                            }
+                            if hard_blocker:
+                                task_run = self.task_runs.block(
+                                    task_run.run_id,
+                                    error=unresolved_failure_detail
+                                    or "A required external permission or credential is unavailable.",
+                                    next_action="Resolve the blocker, then retry the task.",
+                                ) or task_run
+                            else:
+                                next_action = (
+                                    "Inspect the last tool diagnostic and apply one targeted correction."
+                                    if unresolved_tool_failure
+                                    else "Run a narrowed verification check before claiming completion."
+                                )
+                                progress_prefix = (
+                                    "The last step failed, but I’m continuing this task "
+                                    "from its last checkpoint. "
+                                    if unresolved_tool_failure
+                                    else "I’m continuing this task from its last checkpoint. "
+                                )
+                                task_run_progress_reply = (
+                                    progress_prefix + f"Next: {next_action}"
+                                )
+                                task_run_continuation_scheduled = await self._schedule_task_run_continuation(
+                                    task_run,
+                                    msg,
+                                    next_action=next_action,
+                                    phase=TASK_RUN_REPAIRING
+                                    if unresolved_tool_failure
+                                    else TASK_RUN_VERIFYING,
+                                    error=unresolved_failure_detail,
+                                    corrective_failure=bool(unresolved_tool_failure),
+                                    recovery=recovery_state,
+                                )
+
                     if plan_mode and raw_reply:
                         await self._persist_coding_plan(
                             raw_reply,
@@ -8579,6 +9246,11 @@ class AgentLoop:
                     reply_to_user = tag_result.clean_reply
                     soul_updated = tag_result.soul_updated
                     identity_updated = tag_result.identity_updated
+
+                    if task_run_continuation_scheduled and task_run_progress_reply:
+                        reply_to_user = task_run_progress_reply
+                        raw_reply = task_run_progress_reply
+                        force_direct_reply = True
 
                     if any_tool_calls_in_turn and not str(reply_to_user or "").strip():
                         self._log_tool_debug(
@@ -8635,9 +9307,17 @@ class AgentLoop:
                             turn_id=turn_id,
                             message_id=assistant_message_id,
                         )
-                        if unresolved_tool_failure:
+                        if task_run_continuation_scheduled:
+                            meta["task_status"] = "retrying"
+                            meta["task_run_id"] = task_run_id
+                            meta["is_warning"] = True
+                        elif unresolved_tool_failure:
+                            # The assistant may still produce a useful textual
+                            # explanation after a tool fails. Keep the durable
+                            # task state separate from message presentation so
+                            # that this text is not rendered as a transport
+                            # error in the chat UI.
                             meta["task_status"] = "failed"
-                            meta["is_error"] = True
 
                         suppress_web_final_reply = (
                             self._should_suppress_web_final_reply(
@@ -8842,7 +9522,18 @@ class AgentLoop:
                         current
                         and getattr(current, "cancelling", lambda: 0)()
                     )
-                    if is_cancelled:
+                    if task_run_continuation_scheduled:
+                        await _tracker.update_task(
+                            _msg_task_id,
+                            status="retrying",
+                            metadata_update={
+                                "task_run_id": task_run_id,
+                                "task_run_status": "retrying",
+                                "task_run_phase": task_run.phase if task_run else "retrying",
+                                "next_action": task_run.next_action if task_run else "",
+                            },
+                        )
+                    elif is_cancelled:
                         await _tracker.update_task(
                             _msg_task_id,
                             status="cancelled",
@@ -8874,6 +9565,17 @@ class AgentLoop:
                                     + redact_sensitive_text(unresolved_failure_detail)[:500]
                                 ),
                             )
+                    elif task_run is not None and task_run.status == TASK_RUN_BLOCKED:
+                        await _tracker.update_task(
+                            _msg_task_id,
+                            status="failed",
+                            error=task_run.last_error or "Task is blocked.",
+                            metadata_update={
+                                "task_run_id": task_run.run_id,
+                                "task_run_status": task_run.status,
+                                "next_action": task_run.next_action,
+                            },
+                        )
                     else:
                         await _tracker.complete_task(_msg_task_id)
             self._evict_history_image_inputs(session_key)

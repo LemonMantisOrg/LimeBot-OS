@@ -4,6 +4,7 @@ import { strict as assert } from "node:assert";
 import {
   applyUserMessageEdit,
   applyFinalAssistantMessage,
+  applyStreamSnapshot,
   applyStopTyping,
   getUserTurnIndex,
   upsertChangeSet,
@@ -66,6 +67,48 @@ test("stop_typing only clears the targeted streaming assistant message", () => {
 
   assert.equal(stopped[0].isStreaming, true);
   assert.equal(stopped[1].isStreaming, false);
+});
+
+test("post-tool stream reopens the stopped assistant bubble", () => {
+  const initial: ChatMessage[] = [
+    { sender: "bot", content: "Planning...", isStreaming: false, messageId: "msg-1", turnId: "turn-1" },
+  ];
+
+  const streamed = upsertStreamDelta(initial, {
+    messageId: "msg-1",
+    turnId: "turn-1",
+    contentDelta: "Final answer",
+  });
+
+  assert.equal(streamed.length, 1);
+  assert.equal(streamed[0].content, "Planning...Final answer");
+  assert.equal(streamed[0].isStreaming, true);
+});
+
+test("intermediate full-content snapshots stay streamable", () => {
+  const initial: ChatMessage[] = [
+    { sender: "bot", content: "tool residue", isStreaming: true, messageId: "msg-2", turnId: "turn-2" },
+  ];
+
+  const snapshot = applyStreamSnapshot(initial, {
+    messageId: "msg-2",
+    turnId: "turn-2",
+    content: "",
+  });
+
+  assert.equal(snapshot.length, 1);
+  assert.equal(snapshot[0].content, "");
+  assert.equal(snapshot[0].isStreaming, true);
+});
+
+test("targeted stop_typing does not stop an unrelated stream", () => {
+  const initial: ChatMessage[] = [
+    { sender: "bot", content: "Current", isStreaming: true, messageId: "msg-current", turnId: "turn-current" },
+  ];
+
+  const stopped = applyStopTyping(initial, { messageId: "msg-old", turnId: "turn-old" });
+
+  assert.equal(stopped[0].isStreaming, true);
 });
 
 test("late tool execution is inserted before the final reply for the same turn", () => {

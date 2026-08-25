@@ -199,17 +199,28 @@ def load_config(force_reload=False):
         logger.warning("Invalid MAX_ITERATIONS in .env, defaulting to 30.")
         config.max_iterations = 30
 
+    new_recovery_budget = os.getenv("TOOL_RECOVERY_MAX_CORRECTIVE_FAILURES")
+    legacy_recovery_budget = os.getenv("TOOL_RECOVERY_MAX_ATTEMPTS")
+    legacy_budget_selected = new_recovery_budget is None and legacy_recovery_budget is not None
     try:
-        config.tool_recovery_max_attempts = int(
-            os.getenv("TOOL_RECOVERY_MAX_ATTEMPTS", "3")
+        recovery_budget = int(
+            new_recovery_budget
+            if new_recovery_budget is not None
+            else legacy_recovery_budget
+            if legacy_recovery_budget is not None
+            else "5"
         )
     except ValueError:
         logger.warning(
-            "Invalid TOOL_RECOVERY_MAX_ATTEMPTS in .env, defaulting to 3."
+            "Invalid tool recovery budget, defaulting to 5 corrective failures."
         )
-        config.tool_recovery_max_attempts = 3
-    if config.tool_recovery_max_attempts < 1:
-        config.tool_recovery_max_attempts = 3
+        recovery_budget = 3 if legacy_budget_selected else 5
+    if recovery_budget < 1:
+        recovery_budget = 3 if legacy_budget_selected else 5
+    # Keep the old setting as a compatibility alias while making the new
+    # corrective-failure name the source of truth.
+    config.tool_recovery_max_corrective_failures = recovery_budget
+    config.tool_recovery_max_attempts = recovery_budget
 
     try:
         config.command_timeout = float(os.getenv("COMMAND_TIMEOUT", "0"))
@@ -277,7 +288,7 @@ def load_config(force_reload=False):
     from core.llm_utils import get_api_key_for_model
 
     config.llm = SimpleNamespace()
-    default_llm_model = "gemini/gemini-2.0-flash"
+    default_llm_model = "gemini/gemini-3.6-flash"
     config.llm.model = str(os.getenv("LLM_MODEL") or "").strip() or default_llm_model
     config.llm.embedding_model = (
         str(os.getenv("LLM_EMBEDDING_MODEL") or "").strip() or None

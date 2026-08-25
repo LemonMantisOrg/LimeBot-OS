@@ -175,14 +175,15 @@ LimeBot uses [LiteLLM](https://github.com/BerriAI/litellm)  any model it support
 
 | Provider | Example model string |
 |----------|---------------------|
-| **Gemini** (default) | `gemini/gemini-2.0-flash` |
-| **OpenAI** | `openai/gpt-5.5` |
-| **Anthropic** | `anthropic/claude-3-7-sonnet-20250219` |
-| **xAI** | `xai/grok-2-1212` |
-| **DeepSeek** | `deepseek/deepseek-v3.2` |
-| **Moonshot AI (Kimi)** | `moonshot/kimi-k2-thinking` |
-| **Qwen (DashScope)** | `qwen/qwen-plus` |
-| **NVIDIA** | `nvidia/moonshotai/kimi-k2-instruct` |
+| **Gemini** (default) | `gemini/gemini-3.6-flash` |
+| **OpenAI** | `openai/gpt-5.6-sol` |
+| **Anthropic** | `anthropic/claude-opus-5` |
+| **xAI** | `xai/grok-4.6` |
+| **DeepSeek** | `deepseek/deepseek-v4-flash` |
+| **Moonshot AI (Kimi)** | `moonshot/kimi-k3` |
+| **Qwen (DashScope)** | `qwen/qwen3.5-plus` |
+| **NVIDIA** | `nvidia/deepseek-ai/deepseek-v4-flash-0731` |
+| **OpenRouter** | `openrouter/openai/gpt-5.6-sol` |
 Switch models live from the web dashboard without restarting.
 
 ### 🛡️ AI Gateway & Proxy Support
@@ -538,7 +539,7 @@ Copy `.env.example` to `.env`:
 
 ```env
 # Core
-LLM_MODEL=gemini/gemini-2.0-flash
+LLM_MODEL=gemini/gemini-3.6-flash
 GEMINI_API_KEY=your_key_here
 DASHSCOPE_API_KEY=your_dashscope_key_here
 # Optional for Qwen region routing:

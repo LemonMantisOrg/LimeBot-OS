@@ -42,6 +42,8 @@ The heart of the system. Manages:
 - **Stable prompt cache** — the rarely-changing part of the system prompt (soul + identity + user context) is cached for 30 seconds per `(sender_id, channel)` pair. Only the volatile suffix (memory, RAG results, timestamp) is rebuilt each message.
 - **Auto-RAG** — before every LLM call, runs semantic vector search (falls back to the Markdown memory source if embeddings are unavailable). Injects matching memories into the prompt automatically.
 - **Tool execution loop** — after each LLM response, if tool calls are returned, executes them in parallel and loops back to the LLM (up to 30 iterations). Sensitive tools require user confirmation.
+- **Durable task runs** — state-changing and coding requests receive a persistent task-run identity, acceptance criteria, checkpoints, continuation slices, and crash-resume metadata. A turn can return a progress update while the same task continues from its checkpoint.
+- **Progress-aware recovery** — typed tool failures classify invalid arguments, skill defects, dependencies, authentication, policy, timeouts, transient providers, command failures, cancellation, and unknown errors. Diagnostics are free; corrective recovery is bounded by `TOOL_RECOVERY_MAX_CORRECTIVE_FAILURES` (default 5), and duplicate no-progress actions are gated before execution.
 - **Sub-agent delegation** — `spawn_agent` creates an isolated session that runs its own tool loop, can use named specialist profiles, defaults coding/review work to a temporary copy-on-write workspace, captures a bounded structured diff, and reports back to the parent without merging changes implicitly.
 - **Capability readiness gate** — skill, subagent, MCP, and tool discovery run through explicit startup phases. User turns wait for required skills/tools before prompt or schema construction; optional MCP failures produce `degraded` readiness rather than blocking chat. Embedding and LLM warmups are not part of the required gate.
 - **Per-session dedup** — identical consecutive messages within 2 seconds are silently dropped, keyed per session (not globally).
@@ -52,6 +54,23 @@ The heart of the system. Manages:
 - `config.llm.enable_dynamic_personality` — enables mood, affinity, and proactive jobs
 - `config.autonomous_mode` — bypasses confirmation gate for sensitive tools
 - `config.whitelist.allowed_paths` — roots for filesystem access
+
+### `core/task_runs.py` — Durable Task Runs
+
+Stores task-run state in `data/task_runs.sqlite` so multi-step work survives a single
+LLM turn and process restarts. Each run records the original goal, derived acceptance
+criteria, phase, checkpoint, current action, provider, workspace, continuation slices,
+and corrective-failure budget. Terminal outcomes are `completed`, `blocked`, or
+`cancelled`; interrupted active runs are returned to `retrying` on startup.
+
+### `core/recovery_controller.py` — Recovery Policy
+
+Classifies tool outcomes and tracks evidence generations, action signatures, mutations,
+inspection, verification, and corrective budget. On recovery, LimeBot rebuilds the tool
+catalog from registered names and supplies the failing tool plus exact diagnostic,
+editing, verification, and command tools. Invalid-argument retries require successful
+source/schema inspection first. Authentication, policy, cancellation, and non-editable
+source blockers remain hard stops.
 
 ---
 

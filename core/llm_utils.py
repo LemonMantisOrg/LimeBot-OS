@@ -18,13 +18,12 @@ QWEN_COMPAT_BASE_URLS = [
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_CURATED_MODEL_IDS = [
     "anthropic/claude-haiku-4.5",
-    "anthropic/claude-opus-4.6",
-    "anthropic/claude-sonnet-4.5",
-    "anthropic/claude-sonnet-4.6",
-    "deepseek/deepseek-r1",
-    "google/gemini-2.5-flash-lite",
-    "google/gemini-3-flash-preview",
-    "google/gemini-3.1-flash-lite-preview",
+    "anthropic/claude-opus-5",
+    "anthropic/claude-sonnet-5",
+    "deepseek/deepseek-v4-flash",
+    "deepseek/deepseek-v4-pro",
+    "google/gemini-3.7-flash",
+    "google/gemini-3.6-flash",
     "google/gemini-3.1-pro-preview",
     "inception/mercury-2",
     "meta-llama/llama-3.3-70b-instruct",
@@ -34,27 +33,17 @@ OPENROUTER_CURATED_MODEL_IDS = [
     "mistralai/mistral-large",
     "mistralai/mistral-medium-3.1",
     "mistralai/mistral-small-3.2-24b-instruct-2506",
-    "moonshotai/kimi-k2-thinking",
-    "openai/gpt-5",
-    "openai/gpt-5-mini",
-    "openai/gpt-5-nano",
-    "openai/gpt-5.1",
-    "openai/gpt-5.2",
-    "openai/gpt-5.2-pro",
-    "openai/gpt-5.3-chat",
-    "openai/gpt-5.4-mini",
-    "openai/gpt-5.4-nano",
-    "openai/gpt-5.4-pro",
+    "moonshotai/kimi-k3",
+    "openai/gpt-5.6-sol",
+    "openai/gpt-5.6-sol-pro",
+    "openai/gpt-5.6-terra",
+    "openai/gpt-5.6-luna",
     "openai/gpt-oss-120b",
     "perplexity/sonar",
     "perplexity/sonar-pro",
-    "qwen/qwen3-235b-a22b",
-    "x-ai/grok-3",
-    "x-ai/grok-3-mini",
-    "x-ai/grok-4",
-    "x-ai/grok-4-fast",
-    "x-ai/grok-4.1-fast",
-    "z-ai/glm-5",
+    "qwen/qwen3.8-27b",
+    "x-ai/grok-4.6",
+    "z-ai/glm-5.3",
 ]
 OPENROUTER_CURATED_MODEL_ID_SET = frozenset(OPENROUTER_CURATED_MODEL_IDS)
 _DIRECT_PROVIDER_PREFIXES = (
@@ -79,10 +68,14 @@ def _is_unprefixed_openrouter_model(model: str) -> bool:
 
 # Compatibility aliases for provider model IDs that were renamed or removed.
 MODEL_ALIASES = {
-    "xai/grok-4.1-fast-reasoning": "xai/grok-4-fast-reasoning",
-    "xai/grok-4.1-fast-non-reasoning": "xai/grok-4",
-    "grok-4.1-fast-reasoning": "xai/grok-4-fast-reasoning",
-    "grok-4.1-fast-non-reasoning": "xai/grok-4",
+    # DeepSeek retired the legacy aliases after the V4 rollout. Keep existing
+    # LimeBot configurations working while exposing the current explicit IDs.
+    "deepseek/deepseek-chat": "deepseek/deepseek-v4-flash",
+    "deepseek/deepseek-reasoner": "deepseek/deepseek-v4-flash",
+    "xai/grok-4.1-fast-reasoning": "xai/grok-4.6",
+    "xai/grok-4.1-fast-non-reasoning": "xai/grok-4.6",
+    "grok-4.1-fast-reasoning": "xai/grok-4.6",
+    "grok-4.1-fast-non-reasoning": "xai/grok-4.6",
     "nvidia/moonshotai/kimi-k2-5": "nvidia/moonshotai/kimi-k2.5",
     "nvidia/gpt-oss/120b": "nvidia/openai/gpt-oss-120b",
     "nvidia/gpt-oss/20b": "nvidia/openai/gpt-oss-20b",
@@ -112,6 +105,8 @@ async def fetch_openai_compatible_models(
     """
     if not api_key:
         return []
+
+
     if httpx is None:
         logger.warning(
             "httpx is not installed; skipping OpenAI-compatible model fetch for %s",
@@ -173,6 +168,58 @@ async def fetch_openai_compatible_models(
                 return []
     except Exception as e:
         logger.error(f"Error fetching {provider_name} models: {e}")
+        return []
+
+
+async def fetch_gemini_models(api_key: str) -> List[Dict[str, Any]]:
+    """Fetch current Gemini text-generation models from Google's model API."""
+    if not api_key:
+        return []
+    if httpx is None:
+        logger.warning("httpx is not installed; skipping Gemini model fetch")
+        return []
+
+    url = "https://generativelanguage.googleapis.com/v1beta/models"
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                url,
+                params={"key": api_key, "pageSize": 1000},
+                timeout=10.0,
+            )
+            if response.status_code != 200:
+                logger.warning(
+                    "Failed to fetch Gemini models: %s - %s",
+                    response.status_code,
+                    response.text,
+                )
+                return []
+
+            models = []
+            for item in response.json().get("models", []):
+                name = str(item.get("name") or "")
+                model_id = name.removeprefix("models/")
+                methods = item.get("supportedGenerationMethods") or []
+                if not model_id or "generateContent" not in methods:
+                    continue
+                lower_id = model_id.lower()
+                if any(
+                    keyword in lower_id
+                    for keyword in ("embedding", "image", "tts", "audio", "robotics")
+                ):
+                    continue
+                display_name = item.get("displayName") or model_id
+                models.append(
+                    {
+                        "id": f"gemini/{model_id}",
+                        "name": str(display_name),
+                        "provider": "gemini",
+                    }
+                )
+            logger.info("Fetched %s models from Gemini", len(models))
+            return models
+    except Exception as exc:
+        logger.error("Error fetching Gemini models: %s", exc)
         return []
 
 
@@ -346,7 +393,10 @@ def resolve_provider_config(model: str, default_base_url: Optional[str] = None) 
     elif normalized_model.startswith("anthropic/"):
         target_model = normalized_model.removeprefix("anthropic/")
     elif normalized_model.startswith("deepseek/"):
+        if not base_url:
+            base_url = "https://api.deepseek.com"
         target_model = normalized_model.removeprefix("deepseek/")
+        custom_llm_provider = "openai"
 
     return {
         "model": target_model,

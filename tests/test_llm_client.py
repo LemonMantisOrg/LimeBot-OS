@@ -325,5 +325,145 @@ class TestLlmClient(unittest.IsolatedAsyncioTestCase):
                 img_file.unlink()
 
 
+    async def test_deepseek_replays_reasoning_content_for_tool_turns(self):
+        client = LimeLLMClient()
+        provider = ProviderConfig(
+            source_model="deepseek/deepseek-v4-flash",
+            model="deepseek-v4-flash",
+            base_url="https://api.deepseek.com",
+            api_key="deepseek-secret",
+            custom_llm_provider="openai",
+            is_codex=False,
+        )
+        request = ChatRequest(
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "I should inspect the project.",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "list_dir",
+                                "arguments": '{"path":"."}',
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "content": "main.py",
+                },
+                {"role": "user", "content": "continue"},
+            ]
+        )
+
+        with patch(
+            "core.llm_client.acompletion", new=AsyncMock(return_value=object())
+        ) as mock_completion:
+            await client.complete(provider, request)
+
+        sent_messages = mock_completion.await_args.kwargs["messages"]
+        self.assertEqual(
+            sent_messages[0]["reasoning_content"],
+            "I should inspect the project.",
+        )
+
+    async def test_deepseek_omits_tool_choice_in_thinking_mode(self):
+        client = LimeLLMClient()
+        provider = ProviderConfig(
+            source_model="deepseek/deepseek-v4-flash",
+            model="deepseek-v4-flash",
+            base_url="https://api.deepseek.com",
+            api_key="deepseek-secret",
+            custom_llm_provider="openai",
+            is_codex=False,
+        )
+        request = ChatRequest(
+            messages=[{"role": "user", "content": "inspect the project"}],
+            tools=[{"type": "function", "function": {"name": "list_dir"}}],
+            tool_choice="required",
+        )
+
+        with patch(
+            "core.llm_client.acompletion", new=AsyncMock(return_value=object())
+        ) as mock_completion:
+            await client.complete(provider, request)
+
+        self.assertNotIn("tool_choice", mock_completion.await_args.kwargs)
+
+    async def test_thinking_tool_choice_error_retries_without_tool_choice(self):
+        client = LimeLLMClient()
+        provider = ProviderConfig(
+            source_model="openrouter/deepseek/deepseek-v4-flash",
+            model="deepseek/deepseek-v4-flash",
+            base_url="https://openrouter.ai/api/v1",
+            api_key="openrouter-secret",
+            custom_llm_provider="openai",
+            is_codex=False,
+        )
+        request = ChatRequest(
+            messages=[{"role": "user", "content": "inspect the project"}],
+            tools=[{"type": "function", "function": {"name": "list_dir"}}],
+            tool_choice="required",
+        )
+        error = Exception("Thinking mode does not support this tool_choice")
+
+        with patch(
+            "core.llm_client.acompletion",
+            new=AsyncMock(side_effect=[error, object()]),
+        ) as mock_completion:
+            await client.complete(provider, request)
+
+        self.assertEqual(mock_completion.await_count, 2)
+        self.assertEqual(mock_completion.await_args_list[0].kwargs["tool_choice"], "required")
+        self.assertNotIn("tool_choice", mock_completion.await_args_list[1].kwargs)
+
+    async def test_deepseek_drops_legacy_tool_turns_without_reasoning(self):
+        client = LimeLLMClient()
+        provider = ProviderConfig(
+            source_model="deepseek/deepseek-v4-flash",
+            model="deepseek-v4-flash",
+            base_url="https://api.deepseek.com",
+            api_key="deepseek-secret",
+            custom_llm_provider="openai",
+            is_codex=False,
+        )
+        request = ChatRequest(
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_legacy",
+                            "type": "function",
+                            "function": {"name": "list_dir", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_legacy",
+                    "content": "old result",
+                },
+                {"role": "user", "content": "run again"},
+            ]
+        )
+
+        with patch(
+            "core.llm_client.acompletion", new=AsyncMock(return_value=object())
+        ) as mock_completion:
+            await client.complete(provider, request)
+
+        self.assertEqual(
+            mock_completion.await_args.kwargs["messages"],
+            [{"role": "user", "content": "run again"}],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

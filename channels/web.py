@@ -86,6 +86,21 @@ _PIAI_MODELS_JS_PATH = (
 _PIAI_PROVIDER_MODEL_CACHE: dict[str, tuple[float, list[dict[str, str]]]] = {}
 _OPENAI_CURATED_MODELS = [
     {
+        "id": "openai/gpt-5.6-sol",
+        "name": "GPT-5.6 Sol",
+        "provider": "openai",
+    },
+    {
+        "id": "openai/gpt-5.6-terra",
+        "name": "GPT-5.6 Terra",
+        "provider": "openai",
+    },
+    {
+        "id": "openai/gpt-5.6-luna",
+        "name": "GPT-5.6 Luna",
+        "provider": "openai",
+    },
+    {
         "id": "openai/gpt-5.5",
         "name": "GPT-5.5",
         "provider": "openai",
@@ -93,21 +108,6 @@ _OPENAI_CURATED_MODELS = [
     {
         "id": "openai/gpt-5.4",
         "name": "GPT-5.4",
-        "provider": "openai",
-    },
-    {
-        "id": "openai/gpt-5.4-mini",
-        "name": "GPT-5.4 Mini",
-        "provider": "openai",
-    },
-    {
-        "id": "openai/gpt-5.4-nano",
-        "name": "GPT-5.4 Nano",
-        "provider": "openai",
-    },
-    {
-        "id": "openai/gpt-5.3-codex",
-        "name": "GPT-5.3-Codex",
         "provider": "openai",
     },
 ]
@@ -1219,18 +1219,28 @@ class WebChannel(BaseChannel):
             models = [
                 # ── Google Gemini ─────────────────────────────────────────────
                 {
+                    "id": "gemini/gemini-3.6-flash",
+                    "name": "Gemini 3.6 Flash",
+                    "provider": "gemini",
+                },
+                {
+                    "id": "gemini/gemini-3.5-flash",
+                    "name": "Gemini 3.5 Flash",
+                    "provider": "gemini",
+                },
+                {
+                    "id": "gemini/gemini-3.5-flash-lite",
+                    "name": "Gemini 3.5 Flash-Lite",
+                    "provider": "gemini",
+                },
+                {
+                    "id": "gemini/gemini-3.1-flash-lite",
+                    "name": "Gemini 3.1 Flash-Lite",
+                    "provider": "gemini",
+                },
+                {
                     "id": "gemini/gemini-3.1-pro-preview",
                     "name": "Gemini 3.1 Pro (Preview)",
-                    "provider": "gemini",
-                },
-                {
-                    "id": "gemini/gemini-3.1-flash-lite-preview",
-                    "name": "Gemini 3.1 Flash-Lite (Preview)",
-                    "provider": "gemini",
-                },
-                {
-                    "id": "gemini/gemini-3-pro-preview",
-                    "name": "Gemini 3 Pro (Preview)",
                     "provider": "gemini",
                 },
                 {
@@ -1238,91 +1248,51 @@ class WebChannel(BaseChannel):
                     "name": "Gemini 3 Flash (Preview)",
                     "provider": "gemini",
                 },
-                {
-                    "id": "gemini/gemini-2.5-pro",
-                    "name": "Gemini 2.5 Pro",
-                    "provider": "gemini",
-                },
-                {
-                    "id": "gemini/gemini-2.5-flash",
-                    "name": "Gemini 2.5 Flash",
-                    "provider": "gemini",
-                },
-                {
-                    "id": "gemini/gemini-2.5-flash-lite-preview-06-17",
-                    "name": "Gemini 2.5 Flash-Lite",
-                    "provider": "gemini",
-                },
-                {
-                    "id": "gemini/gemini-2.0-flash",
-                    "name": "Gemini 2.0 Flash",
-                    "provider": "gemini",
-                },
-                {
-                    "id": "gemini/gemini-2.0-flash-lite",
-                    "name": "Gemini 2.0 Flash-Lite",
-                    "provider": "gemini",
-                },
-                {
-                    "id": "gemini/gemini-1.5-pro",
-                    "name": "Gemini 1.5 Pro",
-                    "provider": "gemini",
-                },
-                {
-                    "id": "gemini/gemini-1.5-flash",
-                    "name": "Gemini 1.5 Flash",
-                    "provider": "gemini",
-                },
                 # ── OpenAI ────────────────────────────────────────────────────
                 *_OPENAI_CURATED_MODELS,
                 # ── Anthropic ─────────────────────────────────────────────────
                 {
-                    "id": "anthropic/claude-3-7-sonnet-20250219",
-                    "name": "Claude 3.7 Sonnet",
+                    "id": "anthropic/claude-fable-5",
+                    "name": "Claude Fable 5",
                     "provider": "anthropic",
                 },
                 {
-                    "id": "anthropic/claude-3-5-sonnet-20241022",
-                    "name": "Claude 3.5 Sonnet",
+                    "id": "anthropic/claude-opus-5",
+                    "name": "Claude Opus 5",
                     "provider": "anthropic",
                 },
                 {
-                    "id": "anthropic/claude-3-5-haiku-20241022",
-                    "name": "Claude 3.5 Haiku",
+                    "id": "anthropic/claude-sonnet-5",
+                    "name": "Claude Sonnet 5",
                     "provider": "anthropic",
                 },
                 {
-                    "id": "anthropic/claude-3-opus-20240229",
-                    "name": "Claude 3 Opus",
+                    "id": "anthropic/claude-haiku-4-5-20251001",
+                    "name": "Claude Haiku 4.5",
                     "provider": "anthropic",
                 },
                 # ── xAI Grok ─────────────────────────────────────────────────
                 {
-                    "id": "xai/grok-4",
-                    "name": "Grok 4",
+                    "id": "xai/grok-4.6",
+                    "name": "Grok 4.6",
                     "provider": "xai",
                 },
                 {
-                    "id": "xai/grok-4-fast-reasoning",
-                    "name": "Grok 4 Fast (Reasoning)",
-                    "provider": "xai",
-                },
-                {
-                    "id": "xai/grok-3",
-                    "name": "Grok 3",
-                    "provider": "xai",
-                },
-                {
-                    "id": "xai/grok-3-mini",
-                    "name": "Grok 3 Mini",
-                    "provider": "xai",
-                },
-                {
-                    "id": "xai/grok-2-1212",
-                    "name": "Grok 2",
+                    "id": "xai/grok-4.6-latest",
+                    "name": "Grok 4.6 (Latest Alias)",
                     "provider": "xai",
                 },
                 # ── DeepSeek ──────────────────────────────────────────────────
+                {
+                    "id": "deepseek/deepseek-v4-flash",
+                    "name": "DeepSeek V4 Flash",
+                    "provider": "deepseek",
+                },
+                {
+                    "id": "deepseek/deepseek-v4-pro",
+                    "name": "DeepSeek V4 Pro",
+                    "provider": "deepseek",
+                },
                 {
                     "id": "deepseek/deepseek-v3.2",
                     "name": "DeepSeek V3.2",
@@ -1330,15 +1300,25 @@ class WebChannel(BaseChannel):
                 },
                 {
                     "id": "deepseek/deepseek-chat",
-                    "name": "DeepSeek V3",
+                    "name": "DeepSeek Chat (legacy)",
                     "provider": "deepseek",
                 },
                 {
                     "id": "deepseek/deepseek-reasoner",
-                    "name": "DeepSeek R1",
+                    "name": "DeepSeek Reasoner (legacy)",
                     "provider": "deepseek",
                 },
                 # ── Moonshot AI / Kimi ──────────────────────────────────────
+                {
+                    "id": "moonshot/kimi-k3",
+                    "name": "Kimi K3",
+                    "provider": "moonshot",
+                },
+                {
+                    "id": "moonshot/kimi-k2.6",
+                    "name": "Kimi K2.6",
+                    "provider": "moonshot",
+                },
                 {
                     "id": "moonshot/kimi-k2-thinking",
                     "name": "Kimi K2 Thinking",
@@ -1355,21 +1335,46 @@ class WebChannel(BaseChannel):
                     "provider": "moonshot",
                 },
                 {
-                    "id": "qwen/qwen-plus",
-                    "name": "Qwen Plus",
+                    "id": "qwen/qwen3.5-plus",
+                    "name": "Qwen 3.5 Plus",
                     "provider": "qwen",
                 },
                 {
-                    "id": "qwen/qwen-max",
-                    "name": "Qwen Max",
+                    "id": "qwen/qwen3.5-flash",
+                    "name": "Qwen 3.5 Flash",
                     "provider": "qwen",
                 },
                 {
-                    "id": "qwen/qwen-flash",
-                    "name": "Qwen Flash",
+                    "id": "qwen/qwen3-max",
+                    "name": "Qwen 3 Max",
+                    "provider": "qwen",
+                },
+                {
+                    "id": "qwen/qwen3.5-397b-a17b",
+                    "name": "Qwen 3.5 397B",
                     "provider": "qwen",
                 },
                 # ── NVIDIA NIM (static fallbacks — dynamic list fetched below) ─
+                {
+                    "id": "nvidia/deepseek-ai/deepseek-v4-flash-0731",
+                    "name": "DeepSeek V4 Flash (NVIDIA NIM)",
+                    "provider": "nvidia",
+                },
+                {
+                    "id": "nvidia/deepseek-ai/deepseek-v4-pro",
+                    "name": "DeepSeek V4 Pro (NVIDIA NIM)",
+                    "provider": "nvidia",
+                },
+                {
+                    "id": "nvidia/qwen/qwen3-coder-next",
+                    "name": "Qwen 3 Coder Next (NVIDIA NIM)",
+                    "provider": "nvidia",
+                },
+                {
+                    "id": "nvidia/zai-org/glm-5",
+                    "name": "GLM 5 (NVIDIA NIM)",
+                    "provider": "nvidia",
+                },
                 {
                     "id": "nvidia/openai/gpt-oss-120b",
                     "name": "GPT-OSS 120B",
@@ -1456,6 +1461,7 @@ class WebChannel(BaseChannel):
             from core.llm_utils import (
                 OPENROUTER_CURATED_MODEL_IDS,
                 fetch_openai_compatible_models,
+                fetch_gemini_models,
                 fetch_anthropic_models,
             )
 
@@ -1484,11 +1490,13 @@ class WebChannel(BaseChannel):
             )
 
             api_keys = {
+                "gemini": os.getenv("GEMINI_API_KEY"),
                 "nvidia": os.getenv("NVIDIA_API_KEY"),
                 "xai": os.getenv("XAI_API_KEY"),
                 "anthropic": os.getenv("ANTHROPIC_API_KEY"),
                 "deepseek": os.getenv("DEEPSEEK_API_KEY"),
                 "openai": os.getenv("OPENAI_API_KEY"),
+                "openrouter": os.getenv("OPENROUTER_API_KEY"),
                 "moonshot": os.getenv("MOONSHOT_API_KEY")
                 or os.getenv("MOONSHOTAI_API_KEY")
                 or os.getenv("KIMI_API_KEY"),
@@ -1511,6 +1519,21 @@ class WebChannel(BaseChannel):
                     except Exception as e:
                         logger.warning(f"Failed to update {provider} models: {e}")
 
+            if api_keys["gemini"]:
+                await update_provider_cache(
+                    "gemini",
+                    fetch_gemini_models,
+                    api_keys["gemini"],
+                )
+            if api_keys["openrouter"]:
+                await update_provider_cache(
+                    "openrouter",
+                    fetch_openai_compatible_models,
+                    api_keys["openrouter"],
+                    os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1",
+                    "openrouter",
+                    True,
+                )
             if api_keys["nvidia"]:
                 await update_provider_cache(
                     "nvidia",
@@ -3340,6 +3363,42 @@ class WebChannel(BaseChannel):
             tasks = await get_task_tracker().list_tasks()
             return {"tasks": [asdict(task) for task in tasks]}
 
+        @self.app.get("/api/task-runs", dependencies=[Depends(self.verify_auth)])
+        async def get_task_runs(status: Optional[str] = None, limit: int = 100):
+            from core.task_runs import get_task_run_store
+
+            statuses = [status] if status else None
+            runs = get_task_run_store().list_runs(
+                statuses=statuses, limit=max(1, min(int(limit or 100), 500))
+            )
+            return {"task_runs": [run.to_dict() for run in runs]}
+
+        @self.app.get(
+            "/api/task-runs/{run_id}", dependencies=[Depends(self.verify_auth)]
+        )
+        async def get_task_run(run_id: str):
+            from core.task_runs import get_task_run_store
+
+            run = get_task_run_store().get(run_id)
+            if run is None:
+                raise HTTPException(status_code=404, detail="Task run not found")
+            return {"task_run": run.to_dict()}
+
+        @self.app.post(
+            "/api/task-runs/{run_id}/cancel", dependencies=[Depends(self.verify_auth)]
+        )
+        async def cancel_task_run(run_id: str):
+            from core.task_runs import get_task_run_store
+
+            run = get_task_run_store().get(run_id)
+            if run is None:
+                raise HTTPException(status_code=404, detail="Task run not found")
+            if self.agent is not None and run.metadata.get("session_key"):
+                await self.agent.cancel_session(str(run.metadata["session_key"]))
+            else:
+                run = get_task_run_store().cancel(run_id)
+            return {"task_run": (run.to_dict() if run else {})}
+
         @self.app.get(
             "/api/tasks/{task_id}", dependencies=[Depends(self.verify_auth)]
         )
@@ -3773,9 +3832,11 @@ class WebChannel(BaseChannel):
 
     async def _get_app_state(self) -> dict:
         from core.task_tracker import get_task_tracker
+        from core.task_runs import get_task_run_store
         tracker = get_task_tracker()
         workspaces = await tracker.list_workspaces()
         tasks = await tracker.list_tasks(limit=200)
+        task_runs = get_task_run_store().list_runs(limit=200)
         pending_approvals = []
         agent = getattr(self, "agent", None)
         if agent and hasattr(agent, "pending_confirmations"):
@@ -3784,9 +3845,31 @@ class WebChannel(BaseChannel):
         readiness = {}
         if agent and hasattr(agent, "get_readiness_status"):
             readiness = _serialize_readiness_for_app(agent.get_readiness_status())
+        serialized_runs = []
+        for run in task_runs:
+            serialized_runs.append(
+                {
+                    "run_id": run.run_id,
+                    "status": run.status,
+                    "phase": run.phase,
+                    "goal": _redact_sensitive_data(run.goal[:500]),
+                    "acceptance_criteria": list(run.acceptance_criteria)[:8],
+                    "current_step": run.current_step,
+                    "workspace_id": run.workspace_id,
+                    "provider": run.provider,
+                    "slice_count": run.slice_count,
+                    "corrective_failures": run.corrective_failures,
+                    "max_slices": run.max_slices,
+                    "max_corrective_failures": run.max_corrective_failures,
+                    "last_error": _redact_sensitive_data(run.last_error[:500]),
+                    "next_action": _redact_sensitive_data(run.next_action[:500]),
+                    "updated_at": run.updated_at,
+                }
+            )
         return {
             "workspaces": [_serialize_workspace_for_app(w) for w in workspaces],
             "tasks": [_serialize_task_for_app(task) for task in tasks],
+            "task_runs": serialized_runs,
             "pending_approvals": pending_approvals,
             "runtime": {
                 "readiness": readiness,

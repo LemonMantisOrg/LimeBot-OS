@@ -291,14 +291,28 @@ async def main():
     tasks = []
 
     async def _recover_durable_jobs():
+        from core.task_runs import get_task_run_store
+
+        recovered_runs = get_task_run_store().recover_interrupted()
+        for run in recovered_runs:
+            # The task-run checkpoint is authoritative; carry its resume
+            # marker into the durable inbound envelope before publishing it.
+            job_id = str(
+                (run.metadata or {}).get("durable_job_id") or run.run_id
+            ).strip()
+            job_queue.update_payload_metadata(
+                job_id,
+                {"task_run_id": run.run_id, "task_run_resume": True},
+            )
         recovered = job_queue.recover_interrupted()
         ready = job_queue.list_ready()
         for job in ready:
             await bus.publish_inbound(job.to_message())
         if recovered or ready:
             logger.info(
-                "Durable queue recovered %s interrupted job(s) and re-queued %s ready job(s).",
+                "Durable queue recovered %s interrupted job(s), %s task run(s), and re-queued %s ready job(s).",
                 len(recovered),
+                len(recovered_runs),
                 len(ready),
             )
 

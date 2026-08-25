@@ -171,13 +171,16 @@ function findMessageIndex(
   const streamingOnly = options?.streamingOnly ?? false;
 
   if (messageId) {
-    const index = messages.findIndex(
-      (message) =>
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const message = messages[i];
+      if (
         isBotTextMessage(message) &&
         message.messageId === messageId &&
         (!streamingOnly || message.isStreaming)
-    );
-    if (index !== -1) return index;
+      ) {
+        return i;
+      }
+    }
   }
 
   if (turnId) {
@@ -189,6 +192,11 @@ function findMessageIndex(
       return i;
     }
   }
+
+  // A targeted event must never fall through to an unrelated streaming
+  // bubble. This is especially important when an old stream finishes after a
+  // newer turn has already started.
+  if (messageId || turnId) return -1;
 
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i];
@@ -208,7 +216,13 @@ export function upsertStreamDelta(
   const thinkingDelta = delta.thinkingDelta ?? '';
   if (!contentDelta && !thinkingDelta) return messages;
 
-  const index = findMessageIndex(messages, delta, { streamingOnly: true });
+  // `stop_typing` is also used as a pause before tool execution. When the
+  // post-tool model response starts, reopen the exact same assistant bubble
+  // instead of creating a second one.
+  const streamingIndex = findMessageIndex(messages, delta, { streamingOnly: true });
+  const index = streamingIndex !== -1
+    ? streamingIndex
+    : findMessageIndex(messages, delta);
   if (index === -1) {
     return [
       ...messages,
@@ -247,6 +261,43 @@ export function upsertStreamDelta(
     isStreaming: true,
     messageId: delta.messageId || existing.messageId,
     turnId: delta.turnId || existing.turnId,
+  };
+  return updated;
+}
+
+/**
+ * Replace the visible stream with an intermediate provider snapshot.
+ *
+ * This is intentionally different from a final assistant message: snapshots
+ * can be emitted before tool execution and must keep the bubble streamable.
+ */
+export function applyStreamSnapshot(
+  messages: ChatMessage[],
+  payload: MessageTarget & { content: string }
+): ChatMessage[] {
+  const index = findMessageIndex(messages, payload);
+  if (index === -1) {
+    return [
+      ...messages,
+      {
+        sender: 'bot',
+        type: 'text',
+        content: payload.content,
+        isStreaming: true,
+        messageId: payload.messageId || undefined,
+        turnId: payload.turnId || undefined,
+      },
+    ];
+  }
+
+  const updated = [...messages];
+  updated[index] = {
+    ...updated[index],
+    type: 'text',
+    content: payload.content,
+    isStreaming: true,
+    messageId: payload.messageId || updated[index].messageId,
+    turnId: payload.turnId || updated[index].turnId,
   };
   return updated;
 }

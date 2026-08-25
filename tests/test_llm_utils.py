@@ -23,6 +23,33 @@ from core.llm_utils import build_provider_chain, get_api_key_for_model, resolve_
 
 
 class TestLlmUtils(unittest.TestCase):
+    def test_resolve_provider_config_uses_direct_deepseek_v4_api(self):
+        cfg = SimpleNamespace(llm=SimpleNamespace(proxy_url=""))
+        with patch("config.load_config", return_value=cfg), patch.dict(
+            "os.environ",
+            {"DEEPSEEK_API_KEY": "deepseek-secret"},
+            clear=False,
+        ):
+            resolved = resolve_provider_config("deepseek/deepseek-v4-flash")
+
+        self.assertEqual(resolved["model"], "deepseek-v4-flash")
+        self.assertEqual(resolved["base_url"], "https://api.deepseek.com")
+        self.assertEqual(resolved["api_key"], "deepseek-secret")
+        self.assertEqual(resolved["custom_llm_provider"], "openai")
+
+    def test_legacy_deepseek_aliases_resolve_to_v4_flash(self):
+        cfg = SimpleNamespace(llm=SimpleNamespace(proxy_url=""))
+        with patch("config.load_config", return_value=cfg), patch.dict(
+            "os.environ",
+            {"DEEPSEEK_API_KEY": "deepseek-secret"},
+            clear=False,
+        ):
+            resolved = resolve_provider_config("deepseek/deepseek-chat")
+
+        self.assertEqual(resolved["model"], "deepseek-v4-flash")
+        self.assertEqual(resolved["base_url"], "https://api.deepseek.com")
+        self.assertEqual(resolved["custom_llm_provider"], "openai")
+
     def test_openai_model_is_pinned_to_openai_when_openrouter_is_configured(self):
         cfg = SimpleNamespace(llm=SimpleNamespace(proxy_url=""))
         with patch("config.load_config", return_value=cfg), patch.dict(

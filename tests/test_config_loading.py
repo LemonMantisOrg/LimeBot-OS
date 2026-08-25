@@ -71,7 +71,7 @@ class TestConfigLoading(unittest.TestCase):
         with patch.dict("os.environ", {"LLM_MODEL": ""}, clear=False):
             loaded = config_module.load_config(force_reload=True)
 
-        self.assertEqual(loaded.llm.model, "gemini/gemini-2.0-flash")
+        self.assertEqual(loaded.llm.model, "gemini/gemini-3.6-flash")
 
     def test_fallback_models_are_loaded_from_env_and_deduped_against_primary(self):
         import config as config_module

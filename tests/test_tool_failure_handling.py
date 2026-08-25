@@ -263,3 +263,84 @@ class TestToolFailureHandling(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(replies, "Expected a user-visible fallback reply.")
         self.assertIn("failed", replies[-1].content.lower())
         self.assertIn("required", agent.tool_choices)
+
+    async def test_text_followup_after_tool_failure_is_not_rendered_as_error(self):
+        from core.bus import MessageBus
+        from core.events import InboundMessage
+        from core.loop import AgentLoop
+
+        class _TestAgentLoop(AgentLoop):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._consume_calls = 0
+
+            async def _init_skills_and_tools(self) -> None:
+                self._tool_definitions = []
+                self._warmed = True
+
+            async def _llm_call_with_retry(self, *args, **kwargs):
+                return object()
+
+            async def _consume_stream(self, *args, **kwargs):
+                self._consume_calls += 1
+                if self._consume_calls == 1:
+                    return (
+                        "",
+                        [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": '{"path":"TimeTrackerMonoRepo"}',
+                                },
+                            }
+                        ],
+                        None,
+                        False,
+                    )
+                return (
+                    "I can build this, but I cannot currently access the workspace.",
+                    [],
+                    None,
+                    False,
+                )
+
+            async def _execute_tool(
+                self, function_name: str, function_args: dict, session_key: str
+            ):
+                return "Error: Access was denied"
+
+            async def _build_full_system_prompt(self, *args, **kwargs):
+                return "SYSTEM: TEST"
+
+            async def _trim_history(self, *args, **kwargs):
+                return
+
+            async def _schedule_task_run_continuation(self, *args, **kwargs):
+                return False
+
+        bus = MessageBus()
+        agent = _TestAgentLoop(bus=bus)
+        msg = InboundMessage(
+            channel="web",
+            sender_id="tool-user",
+            chat_id="tool-chat",
+            content="inspect the workspace",
+            metadata={},
+        )
+
+        await agent._process_message(msg)
+
+        outbound = []
+        while not bus.outbound.empty():
+            outbound.append(await bus.consume_outbound())
+
+        replies = [
+            item
+            for item in outbound
+            if item.metadata.get("reply_to") == msg.sender_id and item.content
+        ]
+        self.assertTrue(replies, "Expected the assistant's text follow-up.")
+        self.assertIn("cannot currently access", replies[-1].content)
+        self.assertNotEqual(replies[-1].metadata.get("is_error"), True)

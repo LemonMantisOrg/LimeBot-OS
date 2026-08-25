@@ -6,6 +6,36 @@ from unittest.mock import AsyncMock, patch
 
 
 class TestWebModelRegistry(unittest.TestCase):
+    def test_llm_models_expose_current_deepseek_v4_models_first(self):
+        try:
+            from fastapi.testclient import TestClient
+            from channels.web import WebChannel
+            from core.bus import MessageBus
+        except Exception:
+            raise unittest.SkipTest("Missing web channel dependencies.")
+
+        config = SimpleNamespace(
+            whitelist=SimpleNamespace(api_key=None, allowed_paths=[]),
+            web=SimpleNamespace(port=8000, allowed_origins=[]),
+            llm=SimpleNamespace(model="deepseek/deepseek-v4-flash", base_url=None),
+        )
+        channel = WebChannel(config=config, bus=MessageBus())
+
+        with patch.dict("os.environ", {"DEEPSEEK_API_KEY": ""}, clear=False), patch(
+            "channels.web.get_codex_oauth_status",
+            return_value={"configured": False, "provider": "openai-codex"},
+        ):
+            response = TestClient(channel.app).get("/api/llm/models")
+
+        self.assertEqual(response.status_code, 200)
+        deepseek_models = [
+            model for model in response.json()["models"] if model["provider"] == "deepseek"
+        ]
+        self.assertEqual(
+            [model["id"] for model in deepseek_models[:2]],
+            ["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro"],
+        )
+
     def test_llm_models_returns_current_openai_curated_models(self):
         try:
             from fastapi.testclient import TestClient
@@ -17,7 +47,7 @@ class TestWebModelRegistry(unittest.TestCase):
         config = SimpleNamespace(
             whitelist=SimpleNamespace(api_key=None, allowed_paths=[]),
             web=SimpleNamespace(port=8000, allowed_origins=[]),
-            llm=SimpleNamespace(model="openai/gpt-5.5", base_url=None),
+            llm=SimpleNamespace(model="openai/gpt-5.6-sol", base_url=None),
         )
         channel = WebChannel(config=config, bus=MessageBus())
 
@@ -34,11 +64,11 @@ class TestWebModelRegistry(unittest.TestCase):
         self.assertEqual(
             [model["id"] for model in openai_models],
             [
+                "openai/gpt-5.6-sol",
+                "openai/gpt-5.6-terra",
+                "openai/gpt-5.6-luna",
                 "openai/gpt-5.5",
                 "openai/gpt-5.4",
-                "openai/gpt-5.4-mini",
-                "openai/gpt-5.4-nano",
-                "openai/gpt-5.3-codex",
             ],
         )
 

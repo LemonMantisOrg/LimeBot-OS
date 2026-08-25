@@ -450,6 +450,75 @@ class DurableJobQueue:
             finally:
                 conn.close()
 
+    def update_payload_metadata(
+        self, job_id: str, metadata_update: Dict[str, Any]
+    ) -> Optional[Job]:
+        """Atomically add internal continuation metadata to a queued job."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT * FROM jobs WHERE id = ?", (str(job_id),)
+                ).fetchone()
+                if row is None or row["status"] in TERMINAL_STATES:
+                    return _row_to_job(row) if row else None
+                payload = json.loads(row["payload"])
+                metadata = dict(payload.get("metadata") or {})
+                metadata.update(dict(metadata_update or {}))
+                payload["metadata"] = metadata
+                now = time.time()
+                conn.execute(
+                    "UPDATE jobs SET payload = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(payload, default=str), now, str(job_id)),
+                )
+                updated = conn.execute(
+                    "SELECT * FROM jobs WHERE id = ?", (str(job_id),)
+                ).fetchone()
+                return _row_to_job(updated) if updated else None
+            finally:
+                conn.close()
+
+    def requeue_continuation(
+        self,
+        job_id: str,
+        *,
+        delay: float = 0.1,
+        error: Optional[str] = None,
+    ) -> Optional[Job]:
+        """Return a claimed job to the queue without counting a failure.
+
+        A continuation is a new bounded reasoning slice of the same task, not
+        a replay of a failed side-effecting job.  The task-run store owns the
+        continuation budget; this queue only provides crash-safe delivery.
+        """
+        now = time.time()
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET status = ?, last_error = ?, next_retry_at = ?,
+                        lease_owner = NULL, lease_until = NULL,
+                        heartbeat_at = NULL, finished_at = NULL, updated_at = ?
+                    WHERE id = ? AND status = ?
+                    """,
+                    (
+                        QUEUED,
+                        error,
+                        now + max(0.0, float(delay)),
+                        now,
+                        str(job_id),
+                        RUNNING,
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM jobs WHERE id = ?", (str(job_id),)
+                ).fetchone()
+                return _row_to_job(row) if row else None
+            finally:
+                conn.close()
+
     def fail_or_retry(self, job_id: str, error: str) -> Optional[Job]:
         """Retry only transient failures that have not started irreversible work."""
         now = time.time()
