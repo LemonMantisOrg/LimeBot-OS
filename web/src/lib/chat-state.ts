@@ -162,6 +162,22 @@ function dedupeRepeatedSections(content: string): string {
   return trimmed;
 }
 
+function mergeChatAttachments(
+  existing?: ChatAttachment[],
+  incoming?: ChatAttachment[],
+): ChatAttachment[] | undefined {
+  if (!incoming?.length) return existing;
+  if (!existing?.length) return incoming;
+  const seen = new Set(existing.map((item) => item.url));
+  const merged = [...existing];
+  for (const item of incoming) {
+    if (!item.url || seen.has(item.url)) continue;
+    seen.add(item.url);
+    merged.push(item);
+  }
+  return merged;
+}
+
 function findMessageIndex(
   messages: ChatMessage[],
   target: MessageTarget,
@@ -308,6 +324,7 @@ export function applyFinalAssistantMessage(
 ): ChatMessage[] {
   const content = dedupeRepeatedSections(payload.content);
   const index = findMessageIndex(messages, payload);
+  const incomingHasMedia = Boolean(payload.image || payload.attachments?.length);
 
   if (index === -1) {
     return [
@@ -327,18 +344,28 @@ export function applyFinalAssistantMessage(
     ];
   }
 
+  const existing = messages[index];
+  const existingHasContent = Boolean(existing.content?.trim());
+  let nextContent = content;
+  if (incomingHasMedia && existingHasContent) {
+    // A send_media caption must not clobber the streamed/final assistant text.
+    nextContent = existing.content;
+  } else if (!content.trim() && existing.content) {
+    nextContent = existing.content;
+  }
+
   const updated = [...messages];
   updated[index] = {
-    ...updated[index],
-    content,
+    ...existing,
+    content: nextContent,
     variant: payload.variant,
     type: 'text',
     isStreaming: false,
-    image: payload.image ?? updated[index].image ?? null,
-    attachments: payload.attachments ?? updated[index].attachments,
-    voiceUrl: payload.voiceUrl ?? updated[index].voiceUrl,
-    messageId: payload.messageId || updated[index].messageId,
-    turnId: payload.turnId || updated[index].turnId,
+    image: payload.image || existing.image || null,
+    attachments: mergeChatAttachments(existing.attachments, payload.attachments),
+    voiceUrl: payload.voiceUrl ?? existing.voiceUrl,
+    messageId: payload.messageId || existing.messageId,
+    turnId: payload.turnId || existing.turnId,
   };
   return updated;
 }

@@ -197,7 +197,7 @@ class TestSendMediaRemote(unittest.IsolatedAsyncioTestCase):
         tmp_file.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
 
         token = tool_context.set(
-            {"channel": "web", "chat_id": "dash", "sender_id": "u1"}
+            {"channel": "web", "chat_id": "dash", "sender_id": "u1", "turn_id": "turn_web", "message_id": "msg_web"}
         )
         try:
             result = await toolbox.send_media(str(tmp_file), "look")
@@ -212,6 +212,8 @@ class TestSendMediaRemote(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(meta["attachments"][0]["kind"], "image")
         self.assertTrue(meta["attachments"][0]["url"].startswith("/temp/"))
         self.assertEqual(meta["image"], meta["attachments"][0]["url"])
+        self.assertEqual(meta["turn_id"], "turn_web")
+        self.assertEqual(meta["message_id"], "msg_web")
 
     async def test_send_media_rejects_private_url(self):
         from core.context import tool_context

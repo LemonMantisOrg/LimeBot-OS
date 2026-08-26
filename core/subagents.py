@@ -545,6 +545,13 @@ class SubagentRegistry:
         if not self.subagents:
             return ""
 
+        from core.media_intent import is_chat_media_delivery, is_image_generation_request
+
+        if is_chat_media_delivery(current_message) and not is_image_generation_request(
+            current_message
+        ):
+            return ""
+
         lines = [
             "\n## Available Subagents\n",
             "Use `spawn_agent` with specialized subagents when the task matches the agent's description.",

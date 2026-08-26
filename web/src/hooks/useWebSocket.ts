@@ -23,46 +23,12 @@ import {
     upsertToolExecution,
     upsertStreamDelta,
 } from '@/lib/chat-state';
+import { normalizeIncomingAttachments } from '@/lib/chat-media';
 import type { ToolExecution } from '@/components/chat/ToolCard';
 import { classifyStreamDelta, type StreamRenderState } from '@/lib/stream-rendering';
 
 type Message = ChatMessage & {
     toolExecution?: ToolExecution;
-};
-
-const normalizeIncomingAttachments = (value: unknown): ChatAttachment[] | undefined => {
-    if (!Array.isArray(value)) return undefined;
-
-    const attachments = value
-        .map((item) => {
-            if (!item || typeof item !== 'object') return null;
-            const attachment = item as Record<string, unknown>;
-            const name = typeof attachment.name === 'string' ? attachment.name : 'attachment';
-            const mimeType =
-                typeof attachment.mimeType === 'string'
-                    ? attachment.mimeType
-                    : typeof attachment.mime_type === 'string'
-                        ? attachment.mime_type
-                        : 'application/octet-stream';
-            const kind =
-                attachment.kind === 'image' || attachment.kind === 'document'
-                    ? attachment.kind
-                    : mimeType.startsWith('image/')
-                        ? 'image'
-                        : 'document';
-            const url =
-                typeof attachment.url === 'string'
-                    ? attachment.url
-                    : typeof attachment.data_url === 'string'
-                        ? attachment.data_url
-                        : '';
-
-            if (!url) return null;
-            return { name, mimeType, kind, url } satisfies ChatAttachment;
-        })
-        .filter((item): item is ChatAttachment => Boolean(item));
-
-    return attachments.length > 0 ? attachments : undefined;
 };
 
 interface UseWebSocketOptions {

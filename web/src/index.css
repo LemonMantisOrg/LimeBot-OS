@@ -1664,9 +1664,17 @@
   box-shadow: 0 0 8px hsl(var(--primary) / 0.5);
 }
 
-/* Chat grouping tweaks */
-.chat-group-spacer {
-  height: 6px;
+.chat-inline-image {
+  display: block;
+  width: 100%;
+}
+
+.chat-media-bubble .chat-markdown {
+  padding: 0.25rem 0.35rem 0.15rem;
+}
+
+.chat-composer textarea {
+  min-height: 52px;
 }
 
 /* Typing indicator — three-dot bounce */

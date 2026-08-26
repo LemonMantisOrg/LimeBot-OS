@@ -363,7 +363,7 @@ class TestToolSelection(unittest.TestCase):
                 "browser_navigate", "browser_click", "browser_type"
             },
             "search the web for current Python news": {"web_search"},
-            "find an image of a lime": {"image_search"},
+            "find an image of a lime": {"image_search", "send_media"},
             "deep research this topic with sources": {"deep_research"},
             "recall what I told you yesterday": {"memory_search"},
             "remind me tomorrow at noon": {"cron_add"},
@@ -371,6 +371,10 @@ class TestToolSelection(unittest.TestCase):
             "send this photo as an attachment": {"send_media"},
             "send a voice note": {"send_voice"},
             "generate an image of a lime": {"generate_image"},
+            "download a picture of rose of blackpink for me and send me that in this chat": {
+                "image_search",
+                "send_media",
+            },
             "delegate this to a subagent": {"spawn_agent"},
         }
         for prompt, required in cases.items():

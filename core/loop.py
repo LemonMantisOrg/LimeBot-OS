@@ -1909,20 +1909,37 @@ class AgentLoop:
             session_key, current_message
         )
         routing_text = capability_context.get("routing_text") or current_message
+        from core.media_intent import is_chat_media_delivery, is_image_generation_request
+
+        media_delivery_turn = is_chat_media_delivery(
+            routing_text
+        ) and not is_image_generation_request(routing_text)
         if forced_skill_name:
             skills_docs = self.skill_registry.get_forced_prompt_addition(
                 forced_skill_name
             )
+        elif media_delivery_turn:
+            # Native image_search + send_media is the whole job. Skill manuals
+            # (especially download_image) compete with that path.
+            skills_docs = ""
         else:
             skills_docs = self.skill_registry.get_relevant_prompt_additions(
                 routing_text
             )
         capability_docs = (
-            self._capability_catalog_prompt()
-            if prompt_module.is_setup_complete()
-            else ""
+            ""
+            if media_delivery_turn
+            else (
+                self._capability_catalog_prompt()
+                if prompt_module.is_setup_complete()
+                else ""
+            )
         )
-        subagent_docs = self.subagent_registry.get_prompt_additions(current_message)
+        subagent_docs = (
+            ""
+            if media_delivery_turn
+            else self.subagent_registry.get_prompt_additions(current_message)
+        )
         ponytail_docs = build_ponytail_prompt_addition(ponytail_mode)
         include_private_memory = prompt_module.should_load_private_context(
             sender_id, channel, self.config

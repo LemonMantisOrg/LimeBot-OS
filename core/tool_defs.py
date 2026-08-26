@@ -17,6 +17,14 @@ import re
 import unicodedata
 from typing import Any, Dict, Iterable, List, Optional
 
+from core.media_intent import (
+    CHAT_MEDIA_BLOCKED_TOOLS,
+    CHAT_MEDIA_SUPPORTING_TOOLS,
+    CHAT_MEDIA_TOOLS,
+    is_chat_media_delivery,
+    is_image_generation_request,
+)
+
 
 BASE_TOOLS = [
     {
@@ -24,8 +32,9 @@ BASE_TOOLS = [
         "description": (
             "Inspect LimeBot's installed capabilities before claiming an integration, "
             "skill, tool, MCP connection, or specialist is unavailable. Returns a compact "
-            "inventory with matching names, required tools, and operational state. This "
-            "read-only lookup is always available, including on short follow-up turns."
+            "inventory with matching names, required tools, and operational state. "
+            "Do not use this for sending a photo into the current chat — that is "
+            "image_search then send_media."
         ),
         "params": {
             "query": {
@@ -369,7 +378,13 @@ BASE_TOOLS = [
     },
     {
         "name": "spawn_agent",
-        "description": "Delegate a long, parallelizable, or specialized task to a sub-agent. Prefer direct tools for tiny tasks, but use this when the work clearly matches a specialist's description, such as codebase exploration, review, or verification. Avoid duplicating work that the sub-agent can do independently and report back.",
+        "description": (
+            "Delegate a long, parallelizable, or specialized task to a sub-agent. "
+            "Prefer direct tools for tiny tasks. Do not use this to send a photo into "
+            "the current chat — that is image_search then send_media. "
+            "Use spawn_agent when the work clearly matches a specialist such as codebase "
+            "exploration, review, or verification."
+        ),
         "params": {
             "task": {
                 "type": "string",
@@ -510,10 +525,12 @@ BASE_TOOLS = [
     {
         "name": "send_media",
         "description": (
-            "Deliver a requested file or final artifact into the current chat (web, Discord, or WhatsApp). "
-            "Accepts a local file path OR a remote http(s) URL (it is downloaded first). "
-            "Use it once per artifact; never resend the same path to narrate progress or put status text in captions. "
-            "For a picture found via image_search or web_search, pass the Image URL as 'path'."
+            "Deliver a requested file or photo into the current chat (web, Discord, or WhatsApp). "
+            "Accepts a local file path OR a remote http(s) URL (downloaded first, SSRF-guarded). "
+            "This is the tool that actually attaches bytes to the outgoing chat message. "
+            "For 'send/download me a picture of X', call image_search first, then pass one Image URL as 'path'. "
+            "Use it once per artifact; never resend the same path to narrate progress. "
+            "Live chat media fetch is not a filesystem write and does not need confirmation."
         ),
         "params": {
             "path": {
@@ -545,8 +562,10 @@ BASE_TOOLS = [
     {
         "name": "generate_image",
         "description": (
-            "Generate or edit an image using the configured image-capable model. "
+            "Generate or edit a NEW image using the configured image-capable model. "
             "Use this only when the user explicitly asks to create, draw, render, generate, or transform a picture. "
+            "Do NOT use this to download, find, or send an existing photo of a person or subject — "
+            "that is image_search then send_media. "
             "A mention of images already embedded in a document is not an image-generation request. "
             "Never call this tool with a prompt that says image generation is unnecessary. "
             "Images attached to the current message can be used automatically as visual references, "
@@ -888,7 +907,12 @@ SEARCH_TOOLS = [
     },
     {
         "name": "image_search",
-        "description": "Search the web for images. Returns image URLs, source pages, and dimensions. To actually send/show an image to the user, pass one of the Image URLs to send_media(path='<Image URL>'). Example: image_search(query='golden retriever puppy').",
+        "description": (
+            "Search the web for existing images. Returns image URLs, source pages, and dimensions. "
+            "For 'send/download me a picture of X in this chat', call this first, then pass one "
+            "Image URL to send_media(path='<Image URL>'). Do not use generate_image for that request. "
+            "Example: image_search(query='Rosé BLACKPINK')."
+        ),
         "params": {
             "query": {"type": "string", "description": "Image search query."},
             "count": {
@@ -1143,6 +1167,8 @@ _FAMILY_HINTS = {
         "photo",
         "pic",
         "pics",
+        "download",
+        "send",
         "draw",
         "render",
         "art",
@@ -1155,6 +1181,8 @@ _FAMILY_HINTS = {
         "captura",
         "capturas",
         "adjuntar",
+        "foto",
+        "fotos",
     },
     "discord": {
         "discord",
@@ -1184,11 +1212,11 @@ _MANDATORY_FAMILY_TOOLS = {
         "browser_type",
         "browser_wait",
     },
-    "search": {"web_search"},
+    "search": {"web_search", "image_search"},
     "scheduler": {"cron_add", "cron_list", "cron_remove"},
     "memory": {"memory_search", "memory_save"},
     "agent": {"spawn_agent", "get_task_output", "wait_tasks", "kill_task"},
-    "media": {"send_media"},
+    "media": {"send_media", "image_search"},
     "discord": {"send_discord_message", "send_discord_embed", "list_discord_channels"},
     "video": {"analyze_video"},
     "spreadsheet": {"create_spreadsheet", "send_media"},
@@ -1221,7 +1249,7 @@ _TOOL_HINTS = {
     "run_command": {"run", "command", "terminal", "shell", "script", "git", "pytest", "npm", "python"},
     "memory_search": {"memory", "remember", "recall", "history", "journal"},
     "memory_save": {"memory", "remember", "save", "journal", "fact", "preference"},
-    "generate_image": {"image", "images", "picture", "photo", "draw", "render", "generate", "art"},
+    "generate_image": {"draw", "render", "generate", "art", "create", "imagine", "paint", "dalle"},
     "send_discord_message": {"discord", "dm", "direct", "message", "send", "user", "channel"},
     "send_discord_embed": {"discord", "embed", "structured", "send", "channel", "dm"},
     "list_discord_channels": {"discord", "channels", "guild", "server", "list"},
@@ -1235,12 +1263,18 @@ _TOOL_HINTS = {
     "create_skill": {"skill", "scaffold", "template"},
     "google_search": {"google", "search", "web", "website", "results"},
     "web_search": {"search", "web", "google", "find", "lookup", "news", "results", "internet"},
-    "image_search": {"image", "images", "picture", "photo", "pic", "pics", "photos", "find"},
+    "image_search": {
+        "image", "images", "picture", "photo", "pic", "pics", "photos",
+        "find", "download", "foto", "imagen",
+    },
     "deep_research": {
         "research", "investigate", "deep", "compare", "analysis", "report", "sources", "cite",
         "investigar", "investiga", "investigue", "investigacion", "fuentes", "citar",
     },
-    "send_media": {"send", "share", "picture", "photo", "pic", "image", "file", "attach"},
+    "send_media": {
+        "send", "share", "picture", "photo", "pic", "image", "file", "attach",
+        "download", "chat", "foto", "imagen",
+    },
     "send_voice": {"voice", "audio", "speak", "say", "voicenote", "tts", "read", "aloud", "message"},
     "analyze_video": {"video", "watch", "transcript", "caption", "youtube", "youtu", "vimeo", "tiktok", "loom", "mp4", "mov", "mkv", "webm", "m4v", "avi", "recording"},
     "browser_navigate": {"url", "open", "visit", "navigate", "website", "web"},
@@ -1284,10 +1318,17 @@ def shortlist_tool_definitions(
     lowered = text.lower()
     tokens = _tokenize(text)
     selected_families = set()
+    media_delivery = is_chat_media_delivery(text) and not is_image_generation_request(text)
 
     for family, hints in _FAMILY_HINTS.items():
         if tokens & hints:
             selected_families.add(family)
+
+    if media_delivery:
+        selected_families.update({"media", "search"})
+        selected_families.discard("command")
+        selected_families.discard("agent")
+        selected_families.discard("capability")
 
     # Exporting an existing workbook from a website needs browser_download, not
     # the native workbook creator. Keep the spreadsheet family for explicit
@@ -1381,6 +1422,11 @@ def shortlist_tool_definitions(
 
         if name == "run_command" and "command" not in selected_families and selected_families:
             score -= 10
+        if media_delivery:
+            if name in CHAT_MEDIA_TOOLS or name in CHAT_MEDIA_SUPPORTING_TOOLS:
+                score += 40
+            if name in CHAT_MEDIA_BLOCKED_TOOLS:
+                score -= 50
 
         scored.append((score, name, tool))
 
@@ -1390,7 +1436,10 @@ def shortlist_tool_definitions(
         return tool_defs
 
     selected_names = []
+    blocked = set(CHAT_MEDIA_BLOCKED_TOOLS) if media_delivery else set()
     for _, name, _ in scored:
+        if name in blocked:
+            continue
         if name in mandatory and name not in selected_names:
             selected_names.append(name)
         if len(selected_names) >= max_tools:
@@ -1398,6 +1447,8 @@ def shortlist_tool_definitions(
 
     for score, name, _ in scored:
         if score <= 0:
+            continue
+        if name in blocked:
             continue
         if name not in selected_names:
             selected_names.append(name)
@@ -1489,8 +1540,8 @@ def build_tool_definitions(
         enabled_skills: List of enabled skill names from config.
         available_agents: Named subagent profiles for spawn_agent.
         search_available: True when a search API key is configured. Search tools
-            are also enabled whenever the ``browser`` skill is on (the keyless
-            DuckDuckGo fallback needs no browser).
+            are always registered because keyless DuckDuckGo is available even
+            without a paid key or the browser skill.
 
     Returns:
         List of OpenAI-compatible tool definition dicts.
@@ -1508,8 +1559,9 @@ def build_tool_definitions(
 
     browser_enabled = "browser" in enabled_skills
 
-    if search_available or browser_enabled:
-        tools.extend(_inflate_tool(t) for t in SEARCH_TOOLS)
+    # search_available is retained for callers; DuckDuckGo needs no key.
+    _ = search_available
+    tools.extend(_inflate_tool(t) for t in SEARCH_TOOLS)
 
     if browser_enabled:
         tools.extend(_inflate_tool(t) for t in BROWSER_TOOLS)
