@@ -36,6 +36,34 @@ ACTIVE_STATES = frozenset(
     {QUEUED, RUNNING, PLANNING, EXECUTING, VERIFYING, REPAIRING, RETRYING}
 )
 
+# Durable task state is a state machine, not a free-form status field.  In
+# particular, a late continuation must never move a user-cancelled or completed
+# run back to ``running``.
+_STATUS_TRANSITIONS = {
+    QUEUED: frozenset({QUEUED, RUNNING, PLANNING, CANCELLED}),
+    RUNNING: frozenset(
+        {RUNNING, PLANNING, EXECUTING, VERIFYING, REPAIRING, RETRYING, COMPLETED, BLOCKED, CANCELLED}
+    ),
+    PLANNING: frozenset(
+        {PLANNING, RUNNING, EXECUTING, VERIFYING, REPAIRING, RETRYING, COMPLETED, BLOCKED, CANCELLED}
+    ),
+    EXECUTING: frozenset(
+        {EXECUTING, RUNNING, VERIFYING, REPAIRING, RETRYING, COMPLETED, BLOCKED, CANCELLED}
+    ),
+    VERIFYING: frozenset(
+        {VERIFYING, RUNNING, REPAIRING, RETRYING, COMPLETED, BLOCKED, CANCELLED}
+    ),
+    REPAIRING: frozenset(
+        {REPAIRING, RUNNING, EXECUTING, VERIFYING, RETRYING, COMPLETED, BLOCKED, CANCELLED}
+    ),
+    RETRYING: frozenset(
+        {RETRYING, RUNNING, PLANNING, EXECUTING, VERIFYING, REPAIRING, COMPLETED, BLOCKED, CANCELLED}
+    ),
+    COMPLETED: frozenset({COMPLETED}),
+    BLOCKED: frozenset({BLOCKED}),
+    CANCELLED: frozenset({CANCELLED}),
+}
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS task_runs (
     run_id TEXT PRIMARY KEY,
@@ -312,6 +340,7 @@ class TaskRunStore:
         metadata_update: Optional[Dict[str, Any]] = None,
         increment_slice: bool = False,
         increment_corrective_failure: bool = False,
+        corrective_failures: Optional[int] = None,
     ) -> Optional[TaskRun]:
         current = self.get(run_id)
         if current is None:
@@ -322,6 +351,13 @@ class TaskRunStore:
             merged_meta.update(metadata_update)
         next_status = status or current.status
         next_phase = phase or current.phase
+        if next_status != current.status and next_status not in _STATUS_TRANSITIONS.get(
+            current.status, frozenset()
+        ):
+            # Ignore stale lifecycle writes rather than allowing a late worker
+            # to resurrect a terminal task. The caller still receives the
+            # authoritative current record and can report its real state.
+            return current
         next = TaskRun(
             **{
                 **current.to_dict(),
@@ -336,7 +372,11 @@ class TaskRunStore:
                 "result_preview": result_preview if result_preview is not None else current.result_preview,
                 "metadata": merged_meta,
                 "slice_count": current.slice_count + (1 if increment_slice else 0),
-                "corrective_failures": current.corrective_failures + (1 if increment_corrective_failure else 0),
+                "corrective_failures": (
+                    max(current.corrective_failures, _positive_int(corrective_failures, 0, minimum=0))
+                    if corrective_failures is not None
+                    else current.corrective_failures + (1 if increment_corrective_failure else 0)
+                ),
                 "updated_at": now,
                 "heartbeat_at": now,
             }
@@ -402,6 +442,7 @@ class TaskRunStore:
         next_action: str,
         error: str = "",
         corrective_failure: bool = False,
+        corrective_failures: Optional[int] = None,
         checkpoint: Optional[Dict[str, Any]] = None,
         metadata_update: Optional[Dict[str, Any]] = None,
     ) -> Optional[TaskRun]:
@@ -414,6 +455,7 @@ class TaskRunStore:
             checkpoint=checkpoint,
             metadata_update=metadata_update,
             increment_corrective_failure=corrective_failure,
+            corrective_failures=corrective_failures,
         )
 
     def complete(self, run_id: str, *, result: str = "", checkpoint: Optional[Dict[str, Any]] = None) -> Optional[TaskRun]:

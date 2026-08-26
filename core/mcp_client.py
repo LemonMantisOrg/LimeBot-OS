@@ -122,29 +122,120 @@ class MCPManager:
         self._status: Dict[str, Dict[str, Any]] = {}
         self._backoff: Dict[str, Dict[str, Any]] = {}
         self._initialized = True
+        # MCP's stdio transport owns an AnyIO task group.  AsyncExitStack must
+        # be entered and closed by the same asyncio task; using a normal lock
+        # around initialize/shutdown is not enough because the caller task can
+        # change between those operations.  Keep all connection lifecycle work
+        # on one long-lived owner task instead.
         self._lock = asyncio.Lock()
+        self._lifecycle_queue: Optional[asyncio.Queue] = None
+        self._lifecycle_task: Optional[asyncio.Task] = None
+        self._lifecycle_loop = None
 
     async def initialize(self):
-       
         if not MCP_AVAILABLE:
             return
 
-        async with self._lock:
-            await self.shutdown()
-            config = self._load_config()
-            servers = config.get("mcpServers", {})
-            
-            for name, cfg in servers.items():
+        await self._submit_lifecycle("initialize")
+
+    async def _submit_lifecycle(self, operation: str):
+        """Run a lifecycle operation on the task that owns MCP transports."""
+
+        loop = asyncio.get_running_loop()
+        lifecycle_task = self._lifecycle_task
+        if (
+            lifecycle_task is not None
+            and not lifecycle_task.done()
+            and self._lifecycle_loop is not None
+            and self._lifecycle_loop is not loop
+        ):
+            raise RuntimeError(
+                "MCP lifecycle is already owned by a different event loop."
+            )
+
+        if lifecycle_task is None or lifecycle_task.done():
+            self._lifecycle_loop = loop
+            self._lifecycle_queue = asyncio.Queue()
+            self._lifecycle_task = loop.create_task(
+                self._lifecycle_worker(),
+                name="limebot-mcp-lifecycle",
+            )
+
+        queue = self._lifecycle_queue
+        if queue is None:  # pragma: no cover - defensive invariant guard
+            raise RuntimeError("MCP lifecycle queue was not initialized.")
+        result = loop.create_future()
+        await queue.put((operation, result))
+        return await result
+
+    async def _lifecycle_worker(self):
+        """Serialize MCP connect/reconnect/close operations in one task."""
+
+        queue = self._lifecycle_queue
+        if queue is None:  # pragma: no cover - defensive invariant guard
+            return
+
+        try:
+            while True:
+                operation, result = await queue.get()
                 try:
-                    if self._is_in_backoff(name):
-                        logger.warning(f"Skipping MCP server '{name}' (backoff active).")
-                        continue
-                    await self._connect_server(name, cfg)
-                except Exception as e:
-                    self._mark_error(name, str(e))
-                    logger.error(f"Failed to connect to MCP server '{name}': {e}")
-            
-            await self.refresh_tools()
+                    if operation == "initialize":
+                        value = await self._initialize_impl()
+                    elif operation == "shutdown":
+                        value = await self._shutdown_impl()
+                    else:  # pragma: no cover - private callers only use known ops
+                        raise ValueError(f"Unknown MCP lifecycle operation: {operation}")
+                except asyncio.CancelledError:
+                    if not result.done():
+                        result.cancel()
+                    raise
+                except Exception as exc:
+                    if not result.done():
+                        result.set_exception(exc)
+                    logger.error(
+                        "MCP lifecycle operation '{}' failed: {}",
+                        operation,
+                        exc,
+                    )
+                else:
+                    if not result.done():
+                        result.set_result(value)
+
+                # A shutdown closes every stack owned by this task.  Ending
+                # the worker after that operation prevents a later caller
+                # from trying to reuse a queue whose task has already ended.
+                if operation == "shutdown":
+                    return
+        finally:
+            # asyncio.run() and application shutdown cancel pending workers.
+            # Close the stacks before the owner task exits so a later event
+            # loop never attempts to close an AnyIO cancel scope from the wrong
+            # task.
+            try:
+                await self._shutdown_impl()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Error closing MCP connections during worker shutdown")
+
+    async def _initialize_impl(self):
+        """Connect configured servers; called only by the lifecycle owner."""
+
+        await self._shutdown_impl()
+        config = self._load_config()
+        servers = config.get("mcpServers", {})
+
+        for name, cfg in servers.items():
+            try:
+                if self._is_in_backoff(name):
+                    logger.warning(f"Skipping MCP server '{name}' (backoff active).")
+                    continue
+                await self._connect_server(name, cfg)
+            except Exception as e:
+                self._mark_error(name, str(e))
+                logger.error(f"Failed to connect to MCP server '{name}': {e}")
+
+        await self.refresh_tools()
 
     def _load_config(self) -> Dict[str, Any]:
         if not CONFIG_PATH.exists():
@@ -282,6 +373,12 @@ class MCPManager:
 
     async def shutdown(self):
         """Shutdown all active MCP server connections."""
+        if not MCP_AVAILABLE:
+            return
+        await self._submit_lifecycle("shutdown")
+
+    async def _shutdown_impl(self):
+        """Close stacks; called only by the lifecycle owner task."""
         for name, stack in list(self.exit_stacks.items()):
             try:
                 await stack.aclose()

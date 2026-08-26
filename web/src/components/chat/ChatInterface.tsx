@@ -20,7 +20,7 @@ import { ToolCard, ToolExecution } from './ToolCard';
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { AlertTriangle, Info } from "lucide-react";
 import { toast } from "sonner";
-import type { ChatAttachment, ChatChangeSet } from "@/lib/chat-state";
+import type { ChatAttachment, ChatChangeSet, TurnStatus } from "@/lib/chat-state";
 import { renderableAttachmentsForMessage } from "@/lib/chat-media";
 import { readinessLabel, type AgentReadiness } from "@/lib/agent-readiness";
 
@@ -45,6 +45,7 @@ interface Message {
     variant?: 'default' | 'destructive' | 'warning';
     messageId?: string;
     turnId?: string;
+    turnStatus?: TurnStatus;
     voiceUrl?: string;
 }
 
@@ -67,6 +68,7 @@ interface ChatInterfaceProps {
     inputValue: string;
     isConnected: boolean;
     isTyping?: boolean;
+    turnStatuses?: Record<string, TurnStatus>;
     botIdentity?: { name: string; avatar: string | null };
     onInputChange: (value: string) => void;
     onSendMessage: (
@@ -610,6 +612,7 @@ export function ChatInterface({
     inputValue,
     isConnected,
     isTyping,
+    turnStatuses = {},
     botIdentity,
     onInputChange,
     onSendMessage,
@@ -1238,7 +1241,7 @@ export function ChatInterface({
                         {(() => {
                             const items: Array<
                                 | { kind: 'message'; msg: Message; showAvatar: boolean; showHeader: boolean; key: string; absoluteIndex: number }
-                                | { kind: 'tool_timeline'; executions: ToolExecution[]; key: string; absoluteIndex: number }
+                                | { kind: 'tool_timeline'; executions: ToolExecutionWithTurn[]; key: string; absoluteIndex: number }
                             > = [];
 
                             for (let i = 0; i < messages.length; i++) {
@@ -1316,6 +1319,10 @@ export function ChatInterface({
                                             {item.kind === 'tool_timeline' ? (
                                                 <ToolTimeline
                                                     executions={item.executions}
+                                                    turnStatus={(() => {
+                                                        const turnId = String(item.executions[0]?.turnId || '').trim();
+                                                        return turnId ? turnStatuses[`${activeChatId}:${turnId}`] : undefined;
+                                                    })()}
                                                     botIdentity={botIdentity}
                                                     onConfirmSideChannel={handleToolConfirmSideChannel}
                                                 />

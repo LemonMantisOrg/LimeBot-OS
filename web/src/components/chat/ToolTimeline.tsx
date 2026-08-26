@@ -1,25 +1,36 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronUp, CheckCircle2, XCircle, Loader2 } from "lucide-react";
+import { ChevronDown, ChevronUp, CheckCircle2, XCircle, Loader2, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ToolExecution } from "./ToolCard";
 import { BotVisual } from "@/components/pet/BotVisual";
+import type { TurnStatus } from "@/lib/chat-state";
 
 interface ToolTimelineProps {
     executions: ToolExecution[];
     botIdentity?: { name: string; avatar: string | null };
+    turnStatus?: TurnStatus;
     onConfirmSideChannel?: (confId: string, approved: boolean, sessionWhitelist: boolean) => Promise<void>;
 }
 
-export function ToolTimeline({ executions, botIdentity, onConfirmSideChannel }: ToolTimelineProps) {
+export function ToolTimeline({ executions, botIdentity, turnStatus, onConfirmSideChannel }: ToolTimelineProps) {
     const [expanded, setExpanded] = useState(false);
     const [selectedToolId, setSelectedToolId] = useState<string | null>(null);
     const [confirmationConfId, setConfirmationConfId] = useState<string | null>(null);
     const [confirmationStatus, setConfirmationStatus] = useState<'approved' | 'denied' | null>(null);
     const [confirmationSubmitting, setConfirmationSubmitting] = useState(false);
 
-    const hasRunning = executions.some((e) => e.status === "running");
-    const hasError = executions.some((e) => e.status === "error");
-    const hasWaiting = executions.some((e) => e.status === "waiting_confirmation" || e.status === "pending_confirmation");
+    const turnCanStillRun = !turnStatus || turnStatus === "running";
+    const turnCanStillWait = !turnStatus || turnStatus === "running" || turnStatus === "blocked";
+    const hasRunning = turnCanStillRun && executions.some((e) => e.status === "running");
+    // A recovered tool failure remains useful history, but must not make the
+    // whole timeline look failed after the turn has completed or continued.
+    // The terminal turn event is authoritative when available; old sessions
+    // fall back to the historical per-tool status.
+    const hasError = turnStatus ? turnStatus === "failed" : executions.some((e) => e.status === "error");
+    const hasBlocked = turnStatus === "blocked";
+    const hasCancelled = turnStatus === "cancelled";
+    const isRetrying = turnStatus === "retrying";
+    const hasWaiting = turnCanStillWait && executions.some((e) => e.status === "waiting_confirmation" || e.status === "pending_confirmation");
     const completed = executions.filter((e) => e.status === "completed").length;
     const runningExecution = executions.find((e) => e.status === "running");
     const waitingExecution = executions.find((e) => e.status === "waiting_confirmation" || e.status === "pending_confirmation");
@@ -149,9 +160,11 @@ export function ToolTimeline({ executions, botIdentity, onConfirmSideChannel }: 
                             <span>{executions.length} steps</span>
                         </div>
                         <div className="flex items-center gap-2">
-                            {hasRunning && <Loader2 className="h-4 w-4 animate-spin text-primary" />}
-                            {!hasRunning && hasError && <XCircle className="h-4 w-4 text-destructive" />}
-                            {!hasRunning && !hasError && <CheckCircle2 className="h-4 w-4 text-primary" />}
+                            {(hasRunning || isRetrying) && <Loader2 className="h-4 w-4 animate-spin text-primary" />}
+                            {!hasRunning && !isRetrying && hasBlocked && <AlertTriangle className="h-4 w-4 text-amber-500" />}
+                            {!hasRunning && !isRetrying && !hasBlocked && hasCancelled && <AlertTriangle className="h-4 w-4 text-amber-500" />}
+                            {!hasRunning && !isRetrying && !hasBlocked && !hasCancelled && hasError && <XCircle className="h-4 w-4 text-destructive" />}
+                            {!hasRunning && !isRetrying && !hasBlocked && !hasCancelled && !hasError && <CheckCircle2 className="h-4 w-4 text-primary" />}
                             {expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
                         </div>
                     </div>
@@ -160,7 +173,13 @@ export function ToolTimeline({ executions, botIdentity, onConfirmSideChannel }: 
                             ? "⚠️ Action requires confirmation."
                             : hasRunning
                                 ? "Executing tools…"
-                                : hasError
+                                : isRetrying
+                                    ? "Continuing from the last checkpoint…"
+                                    : hasBlocked
+                                        ? "Blocked — action required before continuing."
+                                        : hasCancelled
+                                            ? "Cancelled by user."
+                                            : hasError
                                     ? "One or more tools failed."
                                     : `${completed} completed successfully.`}
                     </div>

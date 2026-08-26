@@ -86,6 +86,7 @@ from core.task_runs import (
     get_task_run_store,
     is_coding_goal,
 )
+from core.turn_state import TurnState, normalize_turn_status
 from core.unattended import evaluate_unattended_tool, is_unattended_turn
 from core import prompt as prompt_module
 from core.metrics import MetricsCollector
@@ -140,11 +141,18 @@ _READ_ONLY_TOOL_NAMES = frozenset(
     {
         "capability_search", "read_file", "list_dir", "search_files", "verify_files", "diagnose_files", "memory_search", "web_search",
         "image_search", "deep_research", "browser_extract", "browser_get_page_text",
-        "browser_snapshot", "browser_list_media", "google_search",
+        "browser_snapshot", "browser_list_media", "google_search", "inspect_skill",
     }
 )
 _MUTATION_TOOL_NAMES = frozenset(
-    {"edit_file", "write_file", "create_spreadsheet", "delete_file"}
+    {
+        "edit_file",
+        "write_file",
+        "create_spreadsheet",
+        "delete_file",
+        "create_skill",
+        "edit_skill",
+    }
 )
 _RESEARCH_TOOL_NAMES = frozenset(
     {
@@ -374,6 +382,10 @@ class AgentLoop:
         self.background_subagent_parents: Dict[str, str] = {}
         self.background_subagent_results: Dict[str, str] = {}
         self._recovery_states: Dict[str, RecoveryState] = {}
+        # Tool outcomes are scoped by turn.  The legacy list remains for
+        # callers/tests that use the batch helper directly, but a concurrent
+        # session must never read another session's last batch.
+        self._last_tool_outcomes_by_turn: Dict[str, List[ToolOutcome]] = {}
 
         self._history_dirty: Dict[str, bool] = {}
 
@@ -423,6 +435,8 @@ class AgentLoop:
             "cron_list": self.toolbox.cron_list,
             "cron_remove": self.toolbox.cron_remove,
             "create_skill": self.toolbox.create_skill,
+            "inspect_skill": self.toolbox.inspect_skill,
+            "edit_skill": self.toolbox.edit_skill,
         }
 
         self.skill_registry = SkillRegistry(skill_dirs=[str(path) for path in get_skill_dirs()], config=cfg)
@@ -2046,6 +2060,63 @@ class AgentLoop:
         payload.setdefault("event_id", f"evt_{uuid.uuid4().hex[:20]}")
         return payload
 
+    @staticmethod
+    def _derive_turn_status(
+        task_run: Any,
+        *,
+        continuation_scheduled: bool = False,
+        unresolved_tool_failure: bool = False,
+        override: Optional[str] = None,
+    ) -> str:
+        """Map internal task state to the small, visible turn vocabulary."""
+
+        if override:
+            return normalize_turn_status(override, default="failed")
+        if continuation_scheduled:
+            return "retrying"
+        task_status = str(getattr(task_run, "status", "") or "").strip().lower()
+        if task_status in {"completed", "retrying", "failed", "blocked", "cancelled"}:
+            return task_status
+        if unresolved_tool_failure:
+            return "failed"
+        return "completed"
+
+    async def _publish_turn_terminal(
+        self,
+        msg: Optional[InboundMessage],
+        state: TurnState,
+        status: str,
+        *,
+        error_code: str = "",
+    ) -> None:
+        """Publish exactly one terminal fence for a visible turn."""
+
+        payload = state.finish(status, error_code=error_code)
+        if payload is None:
+            return
+        payload = self._with_trace_metadata(
+            payload,
+            turn_id=state.turn_id,
+            message_id=state.message_id,
+        )
+        self._log_session_event(
+            state.session_key,
+            {
+                "type": "turn_terminal",
+                "turn_id": state.turn_id,
+                "message_id": state.message_id,
+                "turn_status": payload.get("turn_status"),
+                "terminal_sequence": payload.get("terminal_sequence"),
+                "error_code": str(payload.get("error_code") or "")[:160],
+            },
+        )
+        try:
+            await self._publish_both(msg, "", payload)
+        except Exception:
+            # Delivery is best effort; the durable session event above still
+            # records the terminal transition for reconnecting clients.
+            logger.debug("Could not publish terminal turn event", exc_info=True)
+
     def _normalize_tool_alias(
         self, function_name: str, function_args: dict, session_key: str
     ) -> tuple[str, dict]:
@@ -2540,6 +2611,28 @@ class AgentLoop:
             function_name, function_args, session_key, preview
         )
 
+    def _display_tool_args(
+        self,
+        function_name: str,
+        function_args: Dict[str, Any],
+        preview: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Return UI-safe arguments without weakening the private tool call."""
+
+        if function_name == "edit_skill":
+            safe_preview = preview or self._build_confirmation_preview(
+                function_name, function_args, "display"
+            )
+            return {
+                "skill_name": str(
+                    safe_preview.get("skill")
+                    or function_args.get("skill_name")
+                    or ""
+                )[:120],
+                "changes": list(safe_preview.get("changes") or [])[:32],
+            }
+        return redact_sensitive_value(function_args)
+
     # ── Stream result unpacker ───────────────────────────────────────────
 
     @staticmethod
@@ -2842,7 +2935,13 @@ class AgentLoop:
                 )
                 if claimed is None:
                     current = queue.get(str(durable_job_id))
-                    if current is None or current.status != "queued":
+                    queued_for_later = bool(
+                        current is not None
+                        and current.status == "queued"
+                        and current.next_retry_at is not None
+                        and float(current.next_retry_at) > time.time()
+                    )
+                    if current is None or current.status != "queued" or queued_for_later:
                         logger.info(
                             "Skipping inbound duplicate for durable job %s (%s)",
                             durable_job_id,
@@ -3895,6 +3994,10 @@ class AgentLoop:
         tool_choice: Optional[str] = "auto",
     ) -> Any:
 
+        try:
+            max_retries = max(1, int(max_retries or 1))
+        except (TypeError, ValueError):
+            max_retries = 1
         messages = self._sanitize_messages_for_llm(messages, session_key)
         if not include_tools:
             tools = []
@@ -3964,6 +4067,7 @@ class AgentLoop:
         qwen_auth_failover_attempted: Set[str] = set()
         image_fallback_attempted = False
         model_failover_announced = False
+        last_provider_error: Optional[Exception] = None
 
         for attempt in range(max_retries):
             try:
@@ -3995,6 +4099,7 @@ class AgentLoop:
                 )
                 return response
             except AuthenticationError as e:
+                last_provider_error = e
                 failed_source_model = active_source_model
                 breaker.record_failure(
                     circuit_key,
@@ -4030,7 +4135,12 @@ class AgentLoop:
                                 channel=msg.channel,
                                 chat_id=msg.chat_id,
                                 metadata=self._with_trace_metadata(
-                                    {"reply_to": msg.sender_id, "is_warning": True},
+                                    {
+                                        "reply_to": msg.sender_id,
+                                        "is_warning": True,
+                                        "event_kind": "turn_progress",
+                                        "terminal": False,
+                                    },
                                     turn_id=turn_id,
                                     message_id=message_id,
                                 ),
@@ -4073,6 +4183,7 @@ class AgentLoop:
                 APIConnectionError,
                 ServiceUnavailableError,
             ) as e:
+                last_provider_error = e
                 failed_source_model = active_source_model
                 breaker.record_failure(
                     circuit_key,
@@ -4130,7 +4241,12 @@ class AgentLoop:
                                 channel=msg.channel,
                                 chat_id=msg.chat_id,
                                 metadata=self._with_trace_metadata(
-                                    {"reply_to": msg.sender_id, "is_warning": True},
+                                    {
+                                        "reply_to": msg.sender_id,
+                                        "is_warning": True,
+                                        "event_kind": "turn_progress",
+                                        "terminal": False,
+                                    },
                                     turn_id=turn_id,
                                     message_id=message_id,
                                 ),
@@ -4161,36 +4277,25 @@ class AgentLoop:
                             channel=msg.channel,
                             chat_id=msg.chat_id,
                             metadata=self._with_trace_metadata(
-                                {"reply_to": msg.sender_id, "is_warning": True},
+                                {
+                                    "reply_to": msg.sender_id,
+                                    "is_warning": True,
+                                    "event_kind": "turn_progress",
+                                    "terminal": False,
+                                },
                                 turn_id=turn_id,
                                 message_id=message_id,
                             ),
                         )
                     )
 
+                # The outer turn controller owns the single terminal error
+                # message. Emitting one here and then raising produced two
+                # visible failures for the same provider outage.
+                if attempt >= max_retries - 1:
+                    raise
                 await asyncio.sleep(wait_time)
-
-                if attempt == max_retries - 1:
-                    if is_conn:
-                        content = "❌ Cannot reach AI service. Check your internet connection."
-                    elif is_500:
-                        content = "❌ AI service experiencing errors. Try again in a few minutes."
-                    else:
-                        content = "❌ API rate limit exceeded. Please wait a minute."
-                    if msg:
-                        await self.bus.publish_outbound(
-                            OutboundMessage(
-                                content=content,
-                                channel=msg.channel,
-                                chat_id=msg.chat_id,
-                                metadata=self._with_trace_metadata(
-                                    {"reply_to": msg.sender_id, "is_error": True},
-                                    turn_id=turn_id,
-                                    message_id=message_id,
-                                ),
-                            )
-                        )
-                raise
+                continue
             except asyncio.CancelledError:
                 breaker.record_aborted(
                     circuit_key,
@@ -4214,6 +4319,7 @@ class AgentLoop:
                     f"AI provider timed out after {llm_timeout:g}s. Try again or switch models."
                 ) from e
             except Exception as e:
+                last_provider_error = e
                 failed_source_model = active_source_model
                 auth_like_error = any(
                     marker in str(e or "").lower()
@@ -4281,7 +4387,12 @@ class AgentLoop:
                                 channel=msg.channel,
                                 chat_id=msg.chat_id,
                                 metadata=self._with_trace_metadata(
-                                    {"reply_to": msg.sender_id, "is_warning": True},
+                                    {
+                                        "reply_to": msg.sender_id,
+                                        "is_warning": True,
+                                        "event_kind": "turn_progress",
+                                        "terminal": False,
+                                    },
                                     turn_id=turn_id,
                                     message_id=message_id,
                                 ),
@@ -4303,6 +4414,14 @@ class AgentLoop:
                     )
                     continue
                 raise
+
+        # A provider-specific compatibility branch can exhaust the retry loop
+        # via ``continue`` on its final attempt. Never let that silently return
+        # ``None`` to the turn controller; preserve the concrete provider error
+        # so recovery and the terminal event have evidence.
+        if last_provider_error is not None:
+            raise last_provider_error
+        raise RuntimeError("LLM provider call ended without a response")
 
     async def _trim_history(self, session_key: str, max_tokens: int = 12_000) -> None:
         if session_key not in self.history or len(self.history[session_key]) <= 1:
@@ -5136,6 +5255,7 @@ class AgentLoop:
                 "memory_search",
                 "web_search",
                 "image_search",
+                "inspect_skill",
             }
             if result and not str(result).startswith("Error:") and is_read_only:
                 self.tool_cache.set(function_name, function_args, result)
@@ -5147,6 +5267,7 @@ class AgentLoop:
                     "write_file",
                     "delete_file",
                     "create_skill",
+                    "edit_skill",
                     "run_command",
                 }
                 and result
@@ -5195,13 +5316,34 @@ class AgentLoop:
             if exit_code not in (None, 0):
                 return True
 
-        if function_name in {"edit_file", "verify_files", "diagnose_files"}:
+        if function_name in {
+            "edit_file",
+            "edit_skill",
+            "create_skill",
+            "inspect_skill",
+            "verify_files",
+            "diagnose_files",
+        }:
             try:
                 payload = json.loads(text)
             except (TypeError, json.JSONDecodeError):
                 payload = None
             if isinstance(payload, dict):
-                if payload.get("status") == "failed":
+                status = str(payload.get("status") or "").strip().lower()
+                code = str(payload.get("code") or "").strip().lower()
+                if status in {"error", "failed", "blocked", "cancelled"}:
+                    return True
+                if code in {
+                    "validation_failed",
+                    "skill_read_only",
+                    "stale_match",
+                    "path_rejected",
+                    "symlink_rejected",
+                    "sensitive_path",
+                    "reload_failed",
+                    "skill_edit_failed",
+                    "skill_create_failed",
+                }:
                     return True
                 verification = payload.get("verification")
                 if (
@@ -5251,7 +5393,12 @@ class AgentLoop:
             ).hexdigest()[:16]
         verification_status: Optional[str] = None
         verification_detail = ""
-        if function_name in {"edit_file", "verify_files", "diagnose_files"}:
+        if function_name in {
+            "edit_file",
+            "edit_skill",
+            "verify_files",
+            "diagnose_files",
+        }:
             try:
                 payload = json.loads(text)
             except (TypeError, json.JSONDecodeError):
@@ -5296,6 +5443,15 @@ class AgentLoop:
             failure_category=failure_category or "unknown",
             progress=progress,
         )
+
+    def _get_tool_outcomes(self, turn_id: Optional[str] = None) -> List[ToolOutcome]:
+        """Return outcomes for this turn without crossing session boundaries."""
+
+        if turn_id:
+            scoped = self._last_tool_outcomes_by_turn.get(turn_id)
+            if scoped is not None:
+                return list(scoped)
+        return list(getattr(self, "_last_tool_outcomes", []) or [])
 
     def _recovery_tool_definitions(
         self,
@@ -5419,7 +5575,7 @@ class AgentLoop:
         if recovery is not None and not recovery.can_continue():
             self.task_runs.block(
                 run.run_id,
-                error=error or "Corrective recovery budget exhausted.",
+                error=error or "Corrective recovery limit reached after the recorded failures.",
                 next_action="Review the diagnostic and provide a new direction or credential.",
             )
             return False
@@ -5432,6 +5588,9 @@ class AgentLoop:
             next_action=next_action,
             error=error,
             corrective_failure=corrective_failure,
+            corrective_failures=(
+                recovery.corrective_failures if recovery is not None else None
+            ),
             checkpoint=checkpoint,
             metadata_update={"continuation_requested": True},
         )
@@ -5456,7 +5615,6 @@ class AgentLoop:
             {
                 "task_run_id": run.run_id,
                 "task_run_resume": True,
-                "task_run_continuation_scheduled": True,
             }
         )
         durable_id = str(metadata.get("durable_job_id") or "").strip()
@@ -5479,7 +5637,13 @@ class AgentLoop:
             )
             self.job_queue.requeue_continuation(
                 durable_id,
-                delay=0.15,
+                # The in-memory bus is the fast handoff, while the queued
+                # record is the crash-safe fallback.  Keep the record
+                # immediately claimable: delaying it and publishing the same
+                # message now lets the bus process it once and the queue
+                # process it again after the delay, which showed up as
+                # duplicate WhatsApp replies.
+                delay=0,
                 error=error or "Continuing durable task from checkpoint.",
             )
         else:
@@ -5629,38 +5793,59 @@ class AgentLoop:
         *,
         coding_turn: bool = False,
         allowed_tools: Optional[Set[str]] = None,
+        recovery_state: Optional[RecoveryState] = None,
         turn_id: Optional[str] = None,
         message_id: Optional[str] = None,
     ) -> Tuple[int, Optional[str]]:
         """Queue one model-directed recovery step, or return a concrete blocker."""
         failures = [
             outcome
-            for outcome in getattr(self, "_last_tool_outcomes", [])
+            for outcome in self._get_tool_outcomes(turn_id)
             if not outcome.success
             and (allowed_tools is None or outcome.tool in allowed_tools)
         ]
         if not failures:
             return attempts, None
         failure = failures[-1]
-        budget = max(
-            1,
-            int(
-                getattr(
-                    self.config,
-                    "tool_recovery_max_attempts",
-                    getattr(self.config, "coding_repair_max_attempts", 3),
-                )
-                or 3
-            ),
+        configured_budget = getattr(
+            self.config, "tool_recovery_max_corrective_failures", None
         )
+        legacy_budget = getattr(self.config, "tool_recovery_max_attempts", None)
+        # Older integrations mutate only the alias. Respect that explicit
+        # change while treating the new name as authoritative when both values
+        # still match the loaded configuration.
+        if configured_budget is None or (
+            legacy_budget is not None and legacy_budget != configured_budget
+        ):
+            configured_budget = legacy_budget
+        if configured_budget is None:
+            configured_budget = getattr(self.config, "coding_repair_max_attempts", 5)
+        budget = max(1, int(configured_budget or 5))
+        if recovery_state is not None:
+            # Persist the effective budget with the recovery record so a
+            # continuation cannot silently switch policy between slices.
+            recovery_state.max_corrective_failures = budget
         repeated = failure.failure_fingerprint in fingerprints
         attempts += 1
         fingerprints.add(failure.failure_fingerprint)
-        if attempts > budget:
+        recovery_limit_reached = (
+            not recovery_state.can_continue()
+            if recovery_state is not None
+            else attempts > budget
+        )
+        if recovery_limit_reached:
+            corrective_count = (
+                recovery_state.corrective_failures
+                if recovery_state is not None
+                else attempts - 1
+            )
             blocked = (
-                f"Tool recovery budget ({budget}) is exhausted. The original goal "
-                "remains incomplete. Last diagnostic: "
-                f"{redact_sensitive_text(failure.diagnostic_tail)}"
+                f"Tool recovery budget reached ({corrective_count}/{budget} corrective "
+                "failures). The original goal remains incomplete. "
+                f"Failure category: {failure.failure_category}. Last diagnostic: "
+                f"{redact_sensitive_text(failure.diagnostic_tail)}. "
+                "Next action: inspect this diagnostic and provide a new direction, "
+                "credential, permission, or corrected input."
             )
             if coding_turn:
                 await self._emit_coding_phase(
@@ -5678,11 +5863,16 @@ class AgentLoop:
                     },
                 )
             return attempts, blocked
+        recovery_attempt = (
+            max(1, recovery_state.corrective_failures + 1)
+            if recovery_state is not None
+            else attempts
+        )
         recovery_message = (
-            self._coding_recovery_message(failure, attempts, budget)
+            self._coding_recovery_message(failure, recovery_attempt, budget)
             if coding_turn
             else self._tool_recovery_message(
-                failure, attempts, budget, repeated=repeated
+                failure, recovery_attempt, budget, repeated=repeated
             )
         )
         self.history[session_key].append(
@@ -5703,8 +5893,14 @@ class AgentLoop:
                 {
                     "type": "tool_recovery_queued",
                     "tool": failure.tool,
-                    "attempt": attempts,
+                    "attempt": recovery_attempt,
                     "budget": budget,
+                    "corrective_failures": (
+                        recovery_state.corrective_failures
+                        if recovery_state is not None
+                        else max(0, attempts - 1)
+                    ),
+                    "failure_category": failure.failure_category,
                     "repeated_failure": repeated,
                 },
             )
@@ -6104,7 +6300,9 @@ class AgentLoop:
                     "type": "tool_execution",
                     "status": "planned",
                     "tool": function_name,
-                    "args": redact_sensitive_value(function_args),
+                    "args": self._display_tool_args(
+                        function_name, function_args, preview
+                    ),
                     "preview": redact_sensitive_value(preview),
                     "tool_call_id": tc_id,
                     "turn_id": turn_id,
@@ -6125,7 +6323,7 @@ class AgentLoop:
     ) -> bool:
         """Run reads concurrently, but keep stateful steps in causal model order."""
         any_blocked = False
-        self._last_tool_outcomes = []
+        batch_tool_outcomes: List[ToolOutcome] = []
 
         async def _run_one(tool_call: dict):
             tc_id = tool_call["id"]
@@ -6300,7 +6498,9 @@ class AgentLoop:
                             "type": "tool_execution",
                             "status": "waiting_confirmation",
                             "tool": function_name,
-                            "args": function_args,
+                            "args": self._display_tool_args(
+                                function_name, function_args, confirmation_preview
+                            ),
                             "preview": confirmation_preview,
                             "tool_call_id": tc_id,
                             "conf_id": conf_id,
@@ -6388,7 +6588,7 @@ class AgentLoop:
                     "type": "tool_execution",
                     "status": "running",
                     "tool": function_name,
-                    "args": redact_sensitive_value(function_args),
+                    "args": self._display_tool_args(function_name, function_args),
                     "tool_call_id": tc_id,
                     "turn_id": turn_id,
                     "message_id": message_id,
@@ -6499,7 +6699,12 @@ class AgentLoop:
         await _flush_reads()
 
         for i, outcome in enumerate(outcomes):
-            if isinstance(outcome, Exception):
+            if isinstance(outcome, asyncio.CancelledError):
+                # A cancelled child is a cancelled turn, not an ordinary tool
+                # failure.  Re-raise it so _process_message can emit the
+                # cancellation terminal event and stop the remaining work.
+                raise outcome
+            if isinstance(outcome, BaseException):
                 logger.error(f"⚠ Tool batch exception: {outcome}")
                 # We need to broadcast an error so the UI doesn't get stuck in 'Running'
                 # Extract basic info from the original tool_calls list
@@ -6519,7 +6724,7 @@ class AgentLoop:
                         "type": "tool_execution",
                         "tool": fail_name,
                         "status": "error",
-                        "args": redact_sensitive_value(fail_args),
+                        "args": self._display_tool_args(fail_name, fail_args),
                         "result": redact_sensitive_text(
                             f"Execution failed or was cancelled: {type(outcome).__name__}"
                         ),
@@ -6533,11 +6738,11 @@ class AgentLoop:
                 failure_result = (
                     f"Error executing {fail_name}: {type(outcome).__name__}"
                 )
-                self._last_tool_outcomes.append(
+                batch_tool_outcomes.append(
                     self._build_tool_outcome(fail_name, failure_result)
                 )
                 if recovery_state is not None:
-                    recovery_state.observe(self._last_tool_outcomes[-1], fail_args)
+                    recovery_state.observe(batch_tool_outcomes[-1], fail_args)
                 self.history[session_key].append(
                     {
                         "role": "tool",
@@ -6560,7 +6765,7 @@ class AgentLoop:
                 result = clean_result
 
             outcome_details = self._build_tool_outcome(function_name, result)
-            self._last_tool_outcomes.append(outcome_details)
+            batch_tool_outcomes.append(outcome_details)
             if recovery_state is not None:
                 recovery_state.observe(outcome_details, function_args)
             if coding_turn:
@@ -6592,7 +6797,7 @@ class AgentLoop:
                         "type": "tool_execution",
                         "tool": function_name,
                         "status": tool_status,
-                        "args": redact_sensitive_value(function_args),
+                        "args": self._display_tool_args(function_name, function_args),
                         "result": redact_sensitive_text(result)[
                             :TOOL_BROADCAST_MAX_CHARS
                         ],
@@ -6629,6 +6834,17 @@ class AgentLoop:
                 self._mark_dirty(session_key)
                 self._sessions_pending_tool_image_reply.add(session_key)
 
+        if turn_id:
+            self._last_tool_outcomes_by_turn[turn_id] = list(batch_tool_outcomes)
+            # Keep only a bounded tail for turns whose caller is interrupted
+            # before the outer finally block can clean up.
+            if len(self._last_tool_outcomes_by_turn) > 128:
+                oldest_turn = next(iter(self._last_tool_outcomes_by_turn))
+                if oldest_turn != turn_id:
+                    self._last_tool_outcomes_by_turn.pop(oldest_turn, None)
+        # Backward-compatible diagnostic surface for direct callers. The turn
+        # scoped map above is the authoritative source during real turns.
+        self._last_tool_outcomes = list(batch_tool_outcomes)
         return any_blocked
 
     async def send_tool_progress(
@@ -6656,7 +6872,9 @@ class AgentLoop:
 
         default_arg_names = {
             "read_file": "path",
+            "inspect_skill": "skill_name",
             "edit_file": "edits",
+            "edit_skill": "changes",
             "verify_files": "paths",
             "diagnose_files": "paths",
             "write_file": "content",
@@ -6712,7 +6930,9 @@ class AgentLoop:
             canonical_name = TOOL_NAME_ALIASES.get(call.func.id, call.func.id)
             arg_names = {
                 "read_file": ["path"],
+                "inspect_skill": ["skill_name", "path", "start_line", "end_line"],
                 "edit_file": ["path", "edits", "expected_sha256"],
+                "edit_skill": ["skill_name", "changes"],
                 "verify_files": ["paths", "include_diagnostics", "provider"],
                 "diagnose_files": ["paths", "provider", "timeout"],
                 "write_file": ["path", "content"],
@@ -6957,7 +7177,7 @@ class AgentLoop:
                     return extracted
 
             bare_call_pattern = re.compile(
-                r"\b(?:list_dir|read_file|edit_file|write_file|delete_file|search_files|verify_files|diagnose_files|"
+                r"\b(?:list_dir|read_file|inspect_skill|edit_file|edit_skill|write_file|delete_file|search_files|verify_files|diagnose_files|"
                 r"run_command|memory_search|memory_save|google_search|browser_navigate|"
                 r"spawn_agent|send_media|send_voice|generate_image|send_discord_message|send_discord_embed|list_discord_channels|cron_remove|save_memory|log_memory|ls|dir|cat|"
                 r"grep|rg|ripgrep|find_files|shell|terminal|exec|bash|"
@@ -7019,7 +7239,7 @@ class AgentLoop:
         cleaned = content
         marker_positions = []
         legacy_tag_pattern = (
-            r"<(?:read_file|edit_file|write_file|delete_file|list_dir|search_files|verify_files|diagnose_files|run_command|"
+            r"<(?:read_file|inspect_skill|edit_file|edit_skill|write_file|delete_file|list_dir|search_files|verify_files|diagnose_files|run_command|"
             r"memory_search|memory_save|google_search|browser_navigate|spawn_agent|send_media|send_voice|generate_image|send_discord_message|send_discord_embed|list_discord_channels|"
             r"save_memory|log_memory|ls|dir|list_files|cat|open_file|show_file|"
             r"grep|rg|ripgrep|find_files|shell|terminal|exec|bash|powershell|cmd)>"
@@ -7092,7 +7312,7 @@ class AgentLoop:
             cleaned,
         )
         cleaned = re.sub(
-            legacy_tag_pattern + r".*?</(?:read_file|edit_file|write_file|delete_file|list_dir|search_files|verify_files|diagnose_files|run_command|memory_search|memory_save|google_search|browser_navigate|spawn_agent|send_media|send_voice|generate_image|send_discord_message|send_discord_embed|list_discord_channels|save_memory|log_memory|ls|dir|list_files|cat|open_file|show_file|grep|rg|ripgrep|find_files|shell|terminal|exec|bash|powershell|cmd)>",
+            legacy_tag_pattern + r".*?</(?:read_file|inspect_skill|edit_file|edit_skill|write_file|delete_file|list_dir|search_files|verify_files|diagnose_files|run_command|memory_search|memory_save|google_search|browser_navigate|spawn_agent|send_media|send_voice|generate_image|send_discord_message|send_discord_embed|list_discord_channels|save_memory|log_memory|ls|dir|list_files|cat|open_file|show_file|grep|rg|ripgrep|find_files|shell|terminal|exec|bash|powershell|cmd)>",
             "",
             cleaned,
             flags=re.DOTALL | re.IGNORECASE,
@@ -7531,7 +7751,7 @@ class AgentLoop:
                     clean_content,
                 ).strip()
                 clean_content = re.sub(
-                    r"<(?:read_file|edit_file|write_file|delete_file|list_dir|search_files|verify_files|diagnose_files|run_command|memory_search|memory_save|google_search|browser_navigate|spawn_agent|send_media|send_voice|generate_image|send_discord_message|send_discord_embed|list_discord_channels|save_memory|log_memory|ls|dir|list_files|cat|open_file|show_file|grep|rg|ripgrep|find_files|shell|terminal|exec|bash|powershell|cmd)>.*?</(?:read_file|edit_file|write_file|delete_file|list_dir|search_files|verify_files|diagnose_files|run_command|memory_search|memory_save|google_search|browser_navigate|spawn_agent|send_media|send_voice|generate_image|send_discord_message|send_discord_embed|list_discord_channels|save_memory|log_memory|ls|dir|list_files|cat|open_file|show_file|grep|rg|ripgrep|find_files|shell|terminal|exec|bash|powershell|cmd)>",
+                    r"<(?:read_file|inspect_skill|edit_file|edit_skill|write_file|delete_file|list_dir|search_files|verify_files|diagnose_files|run_command|memory_search|memory_save|google_search|browser_navigate|spawn_agent|send_media|send_voice|generate_image|send_discord_message|send_discord_embed|list_discord_channels|save_memory|log_memory|ls|dir|list_files|cat|open_file|show_file|grep|rg|ripgrep|find_files|shell|terminal|exec|bash|powershell|cmd)>.*?</(?:read_file|inspect_skill|edit_file|edit_skill|write_file|delete_file|list_dir|search_files|verify_files|diagnose_files|run_command|memory_search|memory_save|google_search|browser_navigate|spawn_agent|send_media|send_voice|generate_image|send_discord_message|send_discord_embed|list_discord_channels|save_memory|log_memory|ls|dir|list_files|cat|open_file|show_file|grep|rg|ripgrep|find_files|shell|terminal|exec|bash|powershell|cmd)>",
                     "",
                     clean_content,
                     flags=re.DOTALL | re.IGNORECASE,
@@ -7652,6 +7872,11 @@ class AgentLoop:
         session_key = msg.session_key
         turn_id = f"turn_{uuid.uuid4().hex[:12]}"
         assistant_message_id = f"msg_{uuid.uuid4().hex[:12]}"
+        turn_state = TurnState(
+            turn_id=turn_id,
+            message_id=assistant_message_id,
+            session_key=session_key,
+        )
         turn_started = time.perf_counter()
         tool_batch_duration_s = 0.0
         tool_batch_count = 0
@@ -7675,6 +7900,8 @@ class AgentLoop:
         recovery_state: Optional[RecoveryState] = None
         recovery_blocked: Optional[str] = None
         recovery_required = False
+        turn_status_override: Optional[str] = None
+        turn_error_code = ""
 
         def make_output_queued_recorder(
             iteration_kind: str, iteration: int
@@ -7910,6 +8137,9 @@ class AgentLoop:
                             metadata=self._with_trace_metadata(
                                 {
                                     "is_error": True,
+                                    "event_kind": "transport_error",
+                                    "terminal": True,
+                                    "turn_status": "failed",
                                     "reply_to": msg.sender_id,
                                     "error_code": failure_code,
                                 },
@@ -8493,7 +8723,12 @@ class AgentLoop:
                                 chat_id=msg.chat_id,
                                 content=reply_to_user,
                                 metadata=self._with_trace_metadata(
-                                    {"reply_to": msg.sender_id},
+                                    {
+                                        "reply_to": msg.sender_id,
+                                        "event_kind": "assistant_message",
+                                        "terminal": True,
+                                        "turn_status": "completed",
+                                    },
                                     turn_id=turn_id,
                                     message_id=assistant_message_id,
                                 ),
@@ -8746,11 +8981,11 @@ class AgentLoop:
 
                         batch_failures = [
                             outcome
-                            for outcome in getattr(self, "_last_tool_outcomes", [])
+                            for outcome in self._get_tool_outcomes(turn_id)
                             if not outcome.success
                         ]
                         all_tool_outcomes.extend(
-                            list(getattr(self, "_last_tool_outcomes", []))
+                            self._get_tool_outcomes(turn_id)
                         )
                         if task_run is not None and recovery_state is not None:
                             task_run = self.task_runs.checkpoint(
@@ -8761,6 +8996,7 @@ class AgentLoop:
                                     else TASK_RUN_EXECUTING
                                 ),
                                 status="running",
+                                corrective_failures=recovery_state.corrective_failures,
                                 checkpoint={
                                     **dict(task_run.checkpoint or {}),
                                     "recovery": recovery_state.to_dict(),
@@ -8771,7 +9007,7 @@ class AgentLoop:
                                             "failure_category": item.failure_category,
                                             "verification_status": item.verification_status,
                                         }
-                                        for item in getattr(self, "_last_tool_outcomes", [])
+                                        for item in self._get_tool_outcomes(turn_id)
                                     ],
                                 },
                             ) or task_run
@@ -8784,6 +9020,7 @@ class AgentLoop:
                                 repair_fingerprints,
                                 repair_attempts,
                                 coding_turn=coding_turn,
+                                recovery_state=recovery_state,
                                 turn_id=turn_id,
                                 message_id=assistant_message_id,
                             )
@@ -9046,11 +9283,11 @@ class AgentLoop:
 
                                 batch_failures = [
                                     outcome
-                                    for outcome in getattr(self, "_last_tool_outcomes", [])
+                                    for outcome in self._get_tool_outcomes(turn_id)
                                     if not outcome.success
                                 ]
                                 all_tool_outcomes.extend(
-                                    list(getattr(self, "_last_tool_outcomes", []))
+                                    self._get_tool_outcomes(turn_id)
                                 )
                                 if task_run is not None and recovery_state is not None:
                                     task_run = self.task_runs.checkpoint(
@@ -9061,6 +9298,7 @@ class AgentLoop:
                                             else TASK_RUN_EXECUTING
                                         ),
                                         status="running",
+                                        corrective_failures=recovery_state.corrective_failures,
                                         checkpoint={
                                             **dict(task_run.checkpoint or {}),
                                             "recovery": recovery_state.to_dict(),
@@ -9071,7 +9309,7 @@ class AgentLoop:
                                                     "failure_category": item.failure_category,
                                                     "verification_status": item.verification_status,
                                                 }
-                                                for item in getattr(self, "_last_tool_outcomes", [])
+                                                for item in self._get_tool_outcomes(turn_id)
                                             ],
                                         },
                                     ) or task_run
@@ -9084,6 +9322,7 @@ class AgentLoop:
                                         repair_fingerprints,
                                         repair_attempts,
                                         coding_turn=coding_turn,
+                                        recovery_state=recovery_state,
                                         turn_id=turn_id,
                                         message_id=assistant_message_id,
                                     )
@@ -9195,7 +9434,15 @@ class AgentLoop:
                                     if unresolved_tool_failure
                                     else TASK_RUN_VERIFYING,
                                     error=unresolved_failure_detail,
-                                    corrective_failure=bool(unresolved_tool_failure),
+                                    # The original failed operation is evidence
+                                    # for recovery, not a corrective failure.
+                                    # Count only failures observed after the
+                                    # recovery state became active.
+                                    corrective_failure=bool(
+                                        unresolved_tool_failure
+                                        and recovery_state is not None
+                                        and recovery_state.corrective_failures > 0
+                                    ),
                                     recovery=recovery_state,
                                 )
 
@@ -9296,7 +9543,18 @@ class AgentLoop:
                     )
 
                     if reply_to_user:
-                        meta: Dict = {"reply_to": msg.sender_id}
+                        turn_delivery_status = self._derive_turn_status(
+                            task_run,
+                            continuation_scheduled=task_run_continuation_scheduled,
+                            unresolved_tool_failure=unresolved_tool_failure,
+                            override=turn_status_override,
+                        )
+                        meta: Dict = {
+                            "reply_to": msg.sender_id,
+                            "event_kind": "assistant_message",
+                            "terminal": True,
+                            "turn_status": turn_delivery_status,
+                        }
                         if identity_updated:
                             meta["identity_updated"] = True
                         if iterations_limit_reached:
@@ -9317,6 +9575,7 @@ class AgentLoop:
                             # that this text is not rendered as a transport
                             # error in the chat UI.
                             meta["task_status"] = "failed"
+                            meta["is_warning"] = True
 
                         suppress_web_final_reply = (
                             self._should_suppress_web_final_reply(
@@ -9434,6 +9693,7 @@ class AgentLoop:
                             )
 
                 except asyncio.CancelledError:
+                    turn_status_override = "cancelled"
                     logger.warning(f"⚠ Task cancelled for {session_key}")
                     self._log_session_event(
                         session_key,
@@ -9442,23 +9702,23 @@ class AgentLoop:
                     import contextlib
 
                     with contextlib.suppress(Exception):
-                        await self.bus.publish_outbound(
-                            OutboundMessage(
-                                channel=msg.channel if msg else "web",
-                                chat_id=msg.chat_id if msg else "system",
-                                content="",
-                                metadata=self._with_trace_metadata(
-                                    {
-                                        "type": "cancellation",
-                                        "is_cancellation": True,
-                                    },
-                                    turn_id=turn_id,
-                                    message_id=assistant_message_id,
-                                ),
-                            )
+                        await self._publish_both(
+                            msg,
+                            "",
+                            self._with_trace_metadata(
+                                {
+                                    "type": "cancellation",
+                                    "is_cancellation": True,
+                                    "terminal": True,
+                                    "turn_status": "cancelled",
+                                },
+                                turn_id=turn_id,
+                                message_id=assistant_message_id,
+                            ),
                         )
                     raise
                 except Exception as e:
+                    turn_status_override = "failed"
                     import traceback
 
                     traceback.print_exc()
@@ -9493,13 +9753,27 @@ class AgentLoop:
                         )
                     else:
                         visible_error = f"🚫 **Internal error.**\n`{e}`"
+                    turn_error_code = (
+                        "provider_rate_limit"
+                        if "429" in lower_error
+                        or "rate limit" in lower_error
+                        or "rate_limit" in lower_error
+                        else "turn_processing_failed"
+                    )
                     await self.bus.publish_outbound(
                         OutboundMessage(
                             channel=msg.channel,
                             chat_id=msg.chat_id,
                             content=visible_error,
                             metadata=self._with_trace_metadata(
-                                {"is_error": True, "reply_to": msg.sender_id},
+                                {
+                                    "is_error": True,
+                                    "event_kind": "transport_error",
+                                    "terminal": True,
+                                    "turn_status": "failed",
+                                    "error_code": turn_error_code,
+                                    "reply_to": msg.sender_id,
+                                },
                                 turn_id=turn_id,
                                 message_id=assistant_message_id,
                             ),
@@ -9577,6 +9851,28 @@ class AgentLoop:
                         )
                     else:
                         await _tracker.complete_task(_msg_task_id)
+            current = asyncio.current_task()
+            if current and getattr(current, "cancelling", lambda: 0)():
+                turn_status_override = "cancelled"
+            terminal_status = self._derive_turn_status(
+                task_run,
+                continuation_scheduled=task_run_continuation_scheduled,
+                unresolved_tool_failure=unresolved_tool_failure,
+                override=turn_status_override,
+            )
+            try:
+                await self._publish_turn_terminal(
+                    msg,
+                    turn_state,
+                    terminal_status,
+                    error_code=turn_error_code,
+                )
+            except asyncio.CancelledError:
+                # Preserve the original cancellation while still allowing the
+                # task to unwind cleanly.
+                pass
+            except Exception:
+                logger.debug("Terminal turn event delivery failed", exc_info=True)
             self._evict_history_image_inputs(session_key)
             await self._flush_history(session_key, force=True)
             current_task = asyncio.current_task()
@@ -9585,19 +9881,21 @@ class AgentLoop:
             # Always notify frontend that processing is done
             try:
                 if msg:
-                    await self.bus.publish_outbound(
-                        OutboundMessage(
-                            channel=msg.channel,
-                            chat_id=msg.chat_id,
-                            content="",
-                            metadata=self._with_trace_metadata(
-                                {"type": "stop_typing"},
-                                turn_id=turn_id,
-                                message_id=assistant_message_id,
-                            ),
-                        )
+                    await self._publish_both(
+                        msg,
+                        "",
+                        self._with_trace_metadata(
+                            {
+                                "type": "stop_typing",
+                                "terminal": True,
+                                "turn_status": terminal_status,
+                            },
+                            turn_id=turn_id,
+                            message_id=assistant_message_id,
+                        ),
                     )
             except Exception:
                 pass
+            self._last_tool_outcomes_by_turn.pop(turn_id, None)
             if task_context_token is not None:
                 _CURRENT_TASK_ID.reset(task_context_token)

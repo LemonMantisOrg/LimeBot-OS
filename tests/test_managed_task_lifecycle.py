@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from core.events import InboundMessage
+from core.job_queue import DurableJobQueue
 from core.loop import AgentLoop
 from core.managed_tasks import ManagedTaskRegistry
 from core.task_tracker import TaskStatus, TaskTracker
@@ -135,6 +136,92 @@ class TestSessionEventEnvelope(unittest.IsolatedAsyncioTestCase):
 
 
 class TestInboundDispatchLifecycle(unittest.IsolatedAsyncioTestCase):
+    async def test_continuation_does_not_copy_current_slice_queue_flag(self):
+        class _Queue:
+            def __init__(self):
+                self.updated = []
+                self.requeued = []
+
+            def update_payload_metadata(self, job_id, metadata):
+                self.updated.append((job_id, metadata))
+
+            def requeue_continuation(self, job_id, **kwargs):
+                self.requeued.append((job_id, kwargs))
+                return SimpleNamespace(status="queued")
+
+        bus = SimpleNamespace(publish_inbound=AsyncMock())
+        loop = AgentLoop.__new__(AgentLoop)
+        loop.task_runs = SimpleNamespace(
+            request_resume=lambda run_id, **kwargs: SimpleNamespace(
+                run_id=run_id,
+                metadata={"session_key": "whatsapp:chat-1"},
+                status="retrying",
+                phase=kwargs["phase"],
+                slice_count=1,
+                corrective_failures=0,
+                next_action=kwargs["next_action"],
+                last_error=kwargs.get("error", ""),
+            )
+        )
+        loop.job_queue = _Queue()
+        loop.bus = bus
+        loop._log_session_event = lambda *args, **kwargs: None
+        loop._publish_activity = AsyncMock()
+
+        msg = InboundMessage(
+            channel="whatsapp",
+            sender_id="user-1",
+            chat_id="chat-1",
+            content="continue once",
+            metadata={"durable_job_id": "job-1"},
+        )
+        run = SimpleNamespace(
+            run_id="run-1",
+            terminal=False,
+            slice_count=0,
+            max_slices=5,
+            checkpoint={},
+            metadata={"durable_job_id": "job-1"},
+        )
+
+        scheduled = await loop._schedule_task_run_continuation(
+            run,
+            msg,
+            next_action="retry the original operation",
+            phase="repairing",
+        )
+
+        self.assertTrue(scheduled)
+        resume = bus.publish_inbound.await_args.args[0]
+        self.assertTrue(resume.metadata["task_run_resume"])
+        self.assertNotIn("task_run_continuation_scheduled", resume.metadata)
+        self.assertTrue(msg.metadata["task_run_continuation_scheduled"])
+
+    async def test_dispatch_ignores_duplicate_while_durable_job_is_delayed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            queue = DurableJobQueue(Path(tmpdir) / "jobs.sqlite")
+            original = InboundMessage(
+                channel="whatsapp",
+                sender_id="user-1",
+                chat_id="chat-1",
+                content="continue once",
+            )
+            job = queue.enqueue(original, kind="chat")
+            self.assertIsNotNone(queue.claim(job.id, "worker"))
+            queued = queue.requeue_continuation(job.id, delay=30)
+            self.assertEqual(queued.status, "queued")
+
+            loop = AgentLoop.__new__(AgentLoop)
+            loop.job_queue = queue
+            loop._queue_worker_id = "agent"
+            loop.active_tasks = {}
+            loop._process_message = AsyncMock()
+
+            handle = await loop._dispatch_message(queued.to_message())
+            await handle
+
+        loop._process_message.assert_not_awaited()
+
     async def test_dispatch_registers_before_processing_and_cancellation_closes_task(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tracker = TaskTracker(data_dir=tmpdir)

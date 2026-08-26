@@ -369,7 +369,16 @@ def _app_attempt_terminal_outcome(metadata: dict, msg_type: str) -> tuple[str, s
     if metadata.get("is_error") and is_final_reply:
         error_code = str(metadata.get("error_code") or "agent_error").strip()
         return ("failed", error_code[:200])
-    if msg_type == "message" and metadata.get("reply_to"):
+    turn_status = str(metadata.get("turn_status") or "").strip().lower()
+    if turn_status in {"completed", "failed", "blocked", "cancelled"} and (
+        msg_type == "turn_terminal" or is_final_reply
+    ):
+        return (turn_status, str(metadata.get("error_code") or "")[:200])
+    if msg_type == "message" and metadata.get("reply_to") and (
+        metadata.get("terminal") is True
+        or metadata.get("event_kind") in {"assistant_message", "transport_error"}
+        or not metadata.get("is_warning")
+    ):
         return ("completed", "")
     return None
 
@@ -1962,7 +1971,23 @@ class WebChannel(BaseChannel):
                 await self._write_json(CONFIG_PATH, data)
                 # Re-initialize MCP manager to apply changes
                 mcp_manager = get_mcp_manager()
-                asyncio.create_task(mcp_manager.initialize())
+                mcp_task = asyncio.create_task(
+                    mcp_manager.initialize(),
+                    name="limebot-mcp-reinitialize",
+                )
+
+                def _report_mcp_reinitialize(done_task: asyncio.Task) -> None:
+                    if done_task.cancelled():
+                        return
+                    try:
+                        done_task.result()
+                    except Exception:
+                        # The HTTP request has already returned, so without an
+                        # observer this becomes "Task exception was never
+                        # retrieved" and the real transport failure is lost.
+                        logger.exception("MCP reinitialization failed")
+
+                mcp_task.add_done_callback(_report_mcp_reinitialize)
                 return {"status": "success", "message": "MCP configuration updated"}
             except Exception as e:
                 logger.error(f"Error updating MCP config: {e}")
@@ -2196,7 +2221,67 @@ class WebChannel(BaseChannel):
         async def list_skills():
             from core.skill_installer import SkillInstaller
 
-            return SkillInstaller().list_skills()
+            installer_rows = SkillInstaller().list_skills().get("skills", [])
+            rows_by_name = {
+                str(row.get("name") or row.get("id") or ""): dict(row)
+                for row in installer_rows
+                if isinstance(row, dict)
+            }
+            registry = getattr(self, "agent", None)
+            registry = getattr(registry, "skill_registry", None)
+            catalog = []
+            if registry is not None and hasattr(registry, "get_capability_catalog"):
+                try:
+                    catalog = registry.get_capability_catalog(include_inactive=True)
+                except Exception:
+                    catalog = []
+
+            for item in catalog:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                if not name:
+                    continue
+                row = rows_by_name.setdefault(
+                    name,
+                    {
+                        "name": name,
+                        "id": name,
+                        "type": "limebot",
+                        "source": str(item.get("source_kind") or "limebot"),
+                        "enabled": bool(item.get("enabled")),
+                        "active": bool(item.get("enabled")),
+                        "version": "",
+                        "description": str(item.get("description") or ""),
+                        "repo": "",
+                        "deps_ok": bool(item.get("dependencies_ready", True)),
+                        "missing_deps": {},
+                        "required_deps": {},
+                    },
+                )
+                row["source_kind"] = str(item.get("source_kind") or "legacy-local")
+                row["editable"] = bool(item.get("editable", False))
+                row["enabled"] = bool(item.get("enabled", row.get("enabled", False)))
+                row["active"] = bool(
+                    item.get(
+                        "active",
+                        bool(item.get("enabled", row["enabled"]))
+                        and bool(item.get("dependencies_ready", True)),
+                    )
+                )
+                row["deps_ok"] = bool(item.get("dependencies_ready", row.get("deps_ok", True)))
+
+            for row in rows_by_name.values():
+                source_kind = str(
+                    row.get("source_kind")
+                    or ("git-managed" if str(row.get("source") or "").lower() == "git" else "local")
+                )
+                row["source_kind"] = source_kind
+                row["editable"] = bool(
+                    row.get("editable", source_kind in {"local", "legacy-local"})
+                )
+
+            return {"skills": sorted(rows_by_name.values(), key=lambda row: str(row.get("name") or ""))}
 
         @self.app.get(
             "/api/capabilities/resolve",
@@ -3716,7 +3801,11 @@ class WebChannel(BaseChannel):
                                     "content": "Message id is invalid.",
                                     "sender": "bot",
                                     "chat_id": chat_id,
-                                    "metadata": {"is_error": True},
+                                    "metadata": {
+                                        "is_error": True,
+                                        "event_kind": "transport_error",
+                                        "error_code": "invalid_client_message_id",
+                                    },
                                 }
                             )
                         )
@@ -3741,7 +3830,11 @@ class WebChannel(BaseChannel):
                                     "content": str(e),
                                     "sender": "bot",
                                     "chat_id": chat_id,
-                                    "metadata": {"is_error": True},
+                                    "metadata": {
+                                        "is_error": True,
+                                        "event_kind": "transport_error",
+                                        "error_code": "attachment_rejected",
+                                    },
                                 }
                             )
                         )

@@ -114,6 +114,7 @@ class RecoveryState:
     def observe(self, outcome: Any, args: Optional[Dict[str, Any]] = None) -> None:
         tool = str(getattr(outcome, "tool", "") or "")
         success = bool(getattr(outcome, "success", False))
+        was_active = self.active
         signature = self.signature(tool, args or {})
         self.action_signatures.append(signature)
         self.action_signatures = self.action_signatures[-32:]
@@ -148,7 +149,12 @@ class RecoveryState:
         if evidence:
             self.diagnostic_evidence.append(evidence[:500])
             self.diagnostic_evidence = self.diagnostic_evidence[-12:]
-        if tool not in DIAGNOSTIC_TOOLS:
+        # The first failed operation is evidence that recovery is needed; it is
+        # not itself a corrective failure. Only a failed action after recovery
+        # has started consumes the bounded corrective budget. This distinction
+        # prevents a single bad tool call from spending the entire repair
+        # allowance before inspection can begin.
+        if was_active and tool not in DIAGNOSTIC_TOOLS:
             self.corrective_failures += 1
         self.phase = "inspect" if self.failure_category in {"invalid_arguments", "local_skill_defect", "dependency"} else "repair"
 

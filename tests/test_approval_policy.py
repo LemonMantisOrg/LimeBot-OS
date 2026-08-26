@@ -91,7 +91,7 @@ class TestApprovalPolicyDecisions(unittest.TestCase):
     def test_whatsapp_uses_fast_autonomous_policy_for_sensitive_tools(self):
         # WhatsApp is intentionally fast: contact allow-listing and hard tool
         # safety checks remain active, but no interactive approval is required.
-        for tool in ("run_command", "write_file", "delete_file"):
+        for tool in ("run_command", "write_file", "delete_file", "edit_skill"):
             decision = make_loop()._get_tool_approval_decision(
                 "whatsapp_one", tool, is_whatsapp=True
             )
@@ -138,7 +138,13 @@ class TestApprovalPolicyDecisions(unittest.TestCase):
         from core.confirmation import SENSITIVE_TOOLS
 
         self.assertTrue(
-            {"write_file", "delete_file", "run_command", "cron_remove"}.issubset(
+            {
+                "write_file",
+                "delete_file",
+                "run_command",
+                "cron_remove",
+                "edit_skill",
+            }.issubset(
                 SENSITIVE_TOOLS
             )
         )

@@ -31,6 +31,7 @@ SENSITIVE_TOOLS = frozenset(
         "write_file",
         "create_spreadsheet",
         "cron_remove",
+        "edit_skill",
     }
 )
 
@@ -179,6 +180,51 @@ class ConfirmationManager:
             preview["summary"] = f"Could not preview edit for {preview['path']}: {exc}"
             preview["risk_flags"] = ["preview_error"]
         return preview
+
+    def build_skill_edit_preview(self, function_args: dict) -> Dict[str, Any]:
+        """Build a redacted, bounded preview for ``edit_skill`` approval."""
+
+        skill_name = str(function_args.get("skill_name", "") or "").strip()[:120]
+        changes = function_args.get("changes")
+        rows: List[Dict[str, Any]] = []
+        if isinstance(changes, list):
+            for item in changes[:32]:
+                if not isinstance(item, dict):
+                    continue
+                operation = str(item.get("operation") or item.get("op") or "").strip().lower()[:32]
+                path = str(item.get("path") or "").strip().replace("\\", "/")[:240]
+                if (
+                    not path
+                    or path.startswith("/")
+                    or path.startswith("//")
+                    or re.match(r"^[A-Za-z]:", path)
+                    or ".." in path.split("/")
+                ):
+                    path = "<rejected path>"
+                row: Dict[str, Any] = {"operation": operation, "path": path}
+                if operation == "replace":
+                    old_text = item.get("old_text")
+                    new_text = item.get("new_text")
+                    if isinstance(old_text, str):
+                        row["old_chars"] = len(old_text)
+                    if isinstance(new_text, str):
+                        row["new_chars"] = len(new_text)
+                elif operation == "create":
+                    content = item.get("content", item.get("new_text"))
+                    if isinstance(content, str):
+                        row["content_chars"] = len(content)
+                rows.append(row)
+
+        file_count = len(rows)
+        summary = f"Edit local skill {skill_name or '(missing name)'} in {file_count} file(s)"
+        return {
+            "kind": "edit_skill",
+            "skill": skill_name,
+            "summary": summary,
+            "mode": "transactional",
+            "affected_paths": [str(row.get("path") or "") for row in rows if row.get("path")],
+            "changes": rows,
+        }
 
     def build_spreadsheet_preview(self, function_args: dict) -> Dict[str, Any]:
         """Preview a native XLSX creation without persisting workbook contents."""
@@ -364,6 +410,8 @@ class ConfirmationManager:
             preview = self.build_write_preview(function_args)
         elif function_name == "edit_file":
             preview = self.build_edit_preview(function_args)
+        elif function_name == "edit_skill":
+            preview = self.build_skill_edit_preview(function_args)
         elif function_name == "create_spreadsheet":
             preview = self.build_spreadsheet_preview(function_args)
         elif function_name == "delete_file":
@@ -443,6 +491,23 @@ class ConfirmationManager:
                     {
                         "name": "Content Preview",
                         "value": f"```\n{self._truncate_preview(preview['content_preview'], 800)}\n```",
+                        "inline": False,
+                    }
+                )
+        elif function_name == "edit_skill":
+            if preview.get("skill"):
+                fields.append(
+                    {
+                        "name": "Skill",
+                        "value": f"`{preview['skill']}`",
+                        "inline": False,
+                    }
+                )
+            if preview.get("affected_paths"):
+                fields.append(
+                    {
+                        "name": "Files",
+                        "value": self._truncate_preview(", ".join(preview["affected_paths"]), 800),
                         "inline": False,
                     }
                 )

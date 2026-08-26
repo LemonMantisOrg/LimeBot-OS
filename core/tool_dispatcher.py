@@ -21,6 +21,8 @@ TOOL_RESULT_LIMITS: Dict[str, int] = {
     "capability_search": 4_000,
     "read_file": 8_000,
     "edit_file": 8_000,
+    "inspect_skill": 4_000,
+    "edit_skill": 8_000,
     "search_files": 5_000,
     "verify_files": 6_000,
     "diagnose_files": 8_000,

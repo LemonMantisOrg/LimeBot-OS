@@ -79,6 +79,34 @@ BASE_TOOLS = [
         "required": ["path"],
     },
     {
+        "name": "inspect_skill",
+        "description": (
+            "Inspect a registered LimeBot skill before repairing it. Returns a bounded file "
+            "inventory, selected UTF-8 content, source provenance, and whether the skill is "
+            "editable. Paths are relative to the skill and credentials/absolute runtime paths "
+            "are redacted. Use this before edit_skill or retrying a failed skill command."
+        ),
+        "params": {
+            "skill_name": {
+                "type": "string",
+                "description": "The exact registered skill name, such as 'jira'.",
+            },
+            "path": {
+                "type": "string",
+                "description": "Optional relative file inside the skill; defaults to SKILL.md.",
+            },
+            "start_line": {
+                "type": "integer",
+                "description": "Optional 1-based first line of the selected file.",
+            },
+            "end_line": {
+                "type": "integer",
+                "description": "Optional inclusive last line of the selected file.",
+            },
+        },
+        "required": ["skill_name"],
+    },
+    {
         "name": "edit_file",
         "description": (
             "Apply one or more exact, reviewable text edits to an existing UTF-8 source file. "
@@ -125,6 +153,67 @@ BASE_TOOLS = [
             },
         },
         "required": ["path", "edits", "expected_sha256"],
+    },
+    {
+        "name": "edit_skill",
+        "description": (
+            "Safely repair one registered local LimeBot skill in one transaction. The skill "
+            "must be local or legacy-local; bundled and Git-managed skills are read-only. "
+            "Use inspect_skill first. replace requires exact old_text (and may use occurrence "
+            "or replace_all), create requires content, and delete removes one file. All edits "
+            "are preflighted, validated for SKILL.md/Python/JSON/API importability, atomically "
+            "applied, reloaded into the registry/tool schemas, and rolled back on failure."
+        ),
+        "params": {
+            "skill_name": {
+                "type": "string",
+                "description": "The exact registered local skill name.",
+            },
+            "changes": {
+                "type": "array",
+                "description": "One or more transactional file operations inside the skill.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "operation": {
+                            "type": "string",
+                            "enum": ["replace", "create", "delete"],
+                            "description": "Operation to apply.",
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Relative UTF-8 file path inside the skill.",
+                        },
+                        "old_text": {
+                            "type": "string",
+                            "description": "Exact text required for replace.",
+                        },
+                        "new_text": {
+                            "type": "string",
+                            "description": "Exact replacement text for replace.",
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Complete UTF-8 text for create.",
+                        },
+                        "occurrence": {
+                            "type": "integer",
+                            "description": "1-based occurrence for replace; defaults to 1.",
+                        },
+                        "replace_all": {
+                            "type": "boolean",
+                            "description": "Replace every exact match instead of one.",
+                        },
+                        "expected_sha256": {
+                            "type": "string",
+                            "description": "Optional hash from inspect/read output for stale protection.",
+                        },
+                    },
+                    "required": ["operation", "path"],
+                },
+            },
+        },
+        "required": ["skill_name", "changes"],
     },
     {
         "name": "write_file",
@@ -939,6 +1028,7 @@ SEARCH_TOOLS = [
 _TOOL_FAMILIES = {
     "capability_search": "capability",
     "read_file": "filesystem",
+    "inspect_skill": "capability",
     "edit_file": "filesystem",
     "write_file": "filesystem",
     "create_spreadsheet": "spreadsheet",
@@ -949,6 +1039,7 @@ _TOOL_FAMILIES = {
     "verify_files": "filesystem",
     "diagnose_files": "filesystem",
     "create_skill": "filesystem",
+    "edit_skill": "filesystem",
     "run_command": "command",
     "memory_search": "memory",
     "memory_save": "memory",
@@ -1229,6 +1320,10 @@ _TOOL_HINTS = {
         "disponible", "integracion", "integración", "conexion", "conexión",
     },
     "read_file": {"read", "open", "show", "file", "contents", "content"},
+    "inspect_skill": {
+        "skill", "skills", "skill_name", "manual", "source", "provenance",
+        "inspect", "repair", "fix", "update", "edit", "local",
+    },
     "edit_file": {
         "edit", "patch", "modify", "change", "replace", "fix", "refactor", "file", "code",
     },
@@ -1260,6 +1355,10 @@ _TOOL_HINTS = {
     "cron_list": {"scheduled", "reminders", "jobs", "cron"},
     "cron_remove": {"cancel", "remove", "delete", "scheduled", "reminder"},
     "create_skill": {"skill", "scaffold", "template"},
+    "edit_skill": {
+        "skill", "skills", "edit", "modify", "patch", "repair", "fix",
+        "update", "change", "replace", "delete", "local",
+    },
     "google_search": {"google", "search", "web", "website", "results"},
     "web_search": {"search", "web", "google", "find", "lookup", "news", "results", "internet"},
     "image_search": {

@@ -3,13 +3,36 @@ Skill Registry - Manages loaded skills and injects into LLM context.
 """
 
 import os
+import json
 import re
 import shutil
 from importlib import metadata as importlib_metadata
+from pathlib import Path
 from typing import Dict, List, Any, Optional
 
 from loguru import logger
 from .loader import SkillLoader
+from core.runtime_paths import (
+    PROJECT_DIR,
+    get_local_skills_dir,
+    get_plugin_skill_dirs,
+)
+
+
+_BUNDLED_MANIFEST = Path(__file__).with_name("bundled_manifest.json")
+
+
+def _load_bundled_skill_names() -> set[str]:
+    """Read the explicit manifest used to distinguish shipped skills."""
+
+    try:
+        value = json.loads(_BUNDLED_MANIFEST.read_text(encoding="utf-8"))
+        names = value.get("skills", []) if isinstance(value, dict) else []
+        if isinstance(names, list):
+            return {str(name).strip() for name in names if str(name).strip()}
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning(f"Unable to read bundled skill manifest: {exc}")
+    return set()
 
 
 _SKILL_INVENTORY_PATTERNS = (
@@ -49,6 +72,60 @@ class SkillRegistry:
         self._capability_revision = 0
         self._configured_skill_names: set[str] = set()
 
+    @staticmethod
+    def _is_under(path: Path, root: Path) -> bool:
+        """Return whether *path* is inside *root* without string-prefix bugs."""
+
+        try:
+            path.resolve().relative_to(root.resolve())
+            return True
+        except (OSError, ValueError):
+            return False
+
+    def _skill_source_metadata(self, skill: Dict[str, Any]) -> tuple[str, bool]:
+        """Classify a discovered skill without exposing its filesystem path."""
+
+        base_dir = Path(str(skill.get("base_dir") or ""))
+        name = str(skill.get("name") or "").strip()
+        skills_cfg = getattr(self.config, "skills", None)
+        installed: Any = getattr(skills_cfg, "installed", {}) if skills_cfg else {}
+        if isinstance(self.config, dict):
+            installed = (self.config.get("skills") or {}).get("installed", {})
+        if isinstance(installed, dict):
+            record = installed.get(name) or {}
+            if isinstance(record, dict) and str(record.get("source") or "").lower() in {
+                "git",
+                "github",
+                "gitlab",
+                "repository",
+                "plugin",
+            }:
+                return "git-managed", False
+
+        local_dir = get_local_skills_dir()
+        if self._is_under(base_dir, local_dir):
+            return "local", True
+
+        for plugin_dir in get_plugin_skill_dirs():
+            if self._is_under(base_dir, plugin_dir):
+                return "git-managed", False
+
+        bundled = _load_bundled_skill_names()
+        project_skills = PROJECT_DIR / "skills"
+        if name in bundled and self._is_under(base_dir, project_skills):
+            return "bundled", False
+
+        # A skill supplied through an explicit custom directory, or a legacy
+        # folder under the checkout, is user-owned for editing purposes. The
+        # editor still applies strict path, symlink, and content validation.
+        return "legacy-local", True
+
+    def _annotate_skill_source(self, skill: Dict[str, Any]) -> Dict[str, Any]:
+        source_kind, editable = self._skill_source_metadata(skill)
+        skill["source_kind"] = source_kind
+        skill["editable"] = editable
+        return skill
+
     def discover_and_load(self) -> Dict[str, Dict[str, Any]]:
         """
         Discover all skills and load their API handlers if present.
@@ -59,6 +136,8 @@ class SkillRegistry:
         logger.info("Loading skills...")
         self._capability_revision += 1
         self.skills = self.loader.discover_skills()
+        for skill in self.skills.values():
+            self._annotate_skill_source(skill)
         self._api_handlers.clear()
         self._skill_prompt_cache.clear()
         if hasattr(self, "_cached_prompt_additions"):
@@ -86,6 +165,14 @@ class SkillRegistry:
         self._configured_skill_names = {
             str(name).strip() for name in enabled_skills if str(name).strip()
         }
+
+        # Capture configuration readiness with the discovery snapshot.  A
+        # capability query may run after a temporary environment override (or
+        # after a secret has been removed from the process); recomputing this
+        # from live process state would make the catalog disagree with the
+        # registry revision that was actually loaded.
+        for skill in self.skills.values():
+            skill["missing_configuration"] = self._missing_configuration(skill)
 
         for name in self.skills:
             self.skills[name]["active"] = False
@@ -521,7 +608,10 @@ class SkillRegistry:
         for name, skill in sorted(self.skills.items()):
             active = bool(skill.get("active", False))
             missing = [str(item) for item in (skill.get("missing_dependencies") or [])]
-            missing_configuration = self._missing_configuration(skill)
+            missing_configuration = [
+                str(item)
+                for item in (skill.get("missing_configuration") or [])
+            ]
             configured = not missing_configuration
             if missing:
                 state = "dependencies_missing"
@@ -552,6 +642,8 @@ class SkillRegistry:
                     "connected": None,
                     "verified": False,
                     "missing_dependencies": missing[:8],
+                    "source_kind": str(skill.get("source_kind") or "legacy-local"),
+                    "editable": bool(skill.get("editable", False)),
                 }
             )
         return catalog
@@ -710,23 +802,17 @@ class SkillRegistry:
         return self._api_handlers.get(skill_name)
 
     def reload_skill(self, skill_name: str) -> bool:
-        """Reload a specific skill."""
-        if self.loader.reload_skill(skill_name):
-            skill = self.loader.skills.get(skill_name)
-            if skill:
-                previous = self.skills.get(skill_name) or {}
-                skill["active"] = bool(previous.get("active", False))
-                if skill.get("active"):
-                    missing = self._missing_dependencies(skill)
-                    if missing:
-                        skill["active"] = False
-                        skill["missing_dependencies"] = missing
-                self.skills[skill_name] = skill
-                if skill.get("has_api"):
-                    self._load_api_handler(skill_name, skill)
-                self._capability_revision += 1
-                self._skill_prompt_cache.clear()
-                if hasattr(self, "_cached_prompt_additions"):
-                    delattr(self, "_cached_prompt_additions")
-                return True
-        return False
+        """Reload the complete registry and report whether *skill_name* exists.
+
+        A full snapshot is intentional: edits can create/delete ``api.py`` or
+        rename a skill, and a one-file reload otherwise leaves stale handlers,
+        prompt entries, or enabled state behind.
+        """
+
+        self.discover_and_load()
+        return skill_name in self.skills
+
+    def refresh(self) -> Dict[str, Dict[str, Any]]:
+        """Explicit alias used by mutation tools after a successful edit."""
+
+        return self.discover_and_load()

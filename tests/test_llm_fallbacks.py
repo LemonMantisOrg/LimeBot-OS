@@ -112,6 +112,63 @@ class TestLlmFallbacks(unittest.IsolatedAsyncioTestCase):
             "fallback selection must not replace the configured primary model",
         )
 
+    async def test_llm_call_retries_same_provider_after_transient_failure(self):
+        from core.loop import AgentLoop
+
+        class TransientProviderError(Exception):
+            pass
+
+        loop = AgentLoop.__new__(AgentLoop)
+        loop.model = "openai/gpt-4o-mini"
+        loop.fallback_models = []
+        loop.config = SimpleNamespace(
+            command_timeout=0,
+            llm=SimpleNamespace(base_url=None),
+        )
+        loop._sanitize_messages_for_llm = lambda messages, session_key: messages
+        loop._get_tool_definitions_for_turn = lambda text: []
+        loop._tool_definition_names = lambda tools: []
+        loop._log_tool_debug = lambda *args, **kwargs: None
+        loop._should_retry_without_images = lambda e, messages: False
+        loop._downgrade_image_messages_for_text_model = lambda messages, session_key: False
+        loop._disable_image_inputs_for_session = lambda session_key: None
+        loop.bus = SimpleNamespace(publish_outbound=AsyncMock())
+
+        response = object()
+        loop.llm_client = SimpleNamespace(
+            complete=AsyncMock(
+                side_effect=[TransientProviderError("connection reset"), response]
+            ),
+        )
+
+        with patch.object(
+            loop,
+            "_resolve_provider_chain",
+            return_value=[
+                (
+                    "openai/gpt-4o-mini",
+                    "gpt-4o-mini",
+                    None,
+                    "openai-key",
+                    "openai",
+                ),
+            ],
+        ), patch("core.loop.APIConnectionError", TransientProviderError), patch(
+            "core.loop.asyncio.sleep", new=AsyncMock()
+        ) as sleep:
+            result = await loop._llm_call_with_retry(
+                messages=[{"role": "user", "content": "try again"}],
+                session_key="web_demo",
+                msg=None,
+                max_retries=2,
+                stream=False,
+                include_tools=False,
+            )
+
+        self.assertIs(result, response)
+        self.assertEqual(loop.llm_client.complete.await_count, 2)
+        sleep.assert_awaited_once()
+
     async def test_llm_call_times_out_instead_of_hanging_turn(self):
         from core.loop import AgentLoop
 

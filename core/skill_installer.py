@@ -29,10 +29,12 @@ from typing import Optional
 
 from loguru import logger
 
-from core.runtime_paths import get_config_file, get_skills_dir
+from core.runtime_paths import get_config_file, get_skill_dirs, get_skills_dir
 
 SKILLS_DIR = get_skills_dir()
 CONFIG_FILE = get_config_file()
+_INITIAL_SKILLS_DIR = Path(SKILLS_DIR)
+_INITIAL_CONFIG_FILE = Path(CONFIG_FILE)
 
 try:
     import yaml
@@ -53,14 +55,29 @@ class SkillInstaller:
     """Manages external skill installation, updates, and removal."""
 
     def __init__(self):
+        # Keep the module constants as a compatibility seam for embedders and
+        # tests, but capture them per instance so one installer never follows a
+        # later environment change halfway through an operation.
+        configured_skills_dir = Path(SKILLS_DIR)
+        configured_config_file = Path(CONFIG_FILE)
+        self.skills_dir = (
+            get_skills_dir()
+            if configured_skills_dir == _INITIAL_SKILLS_DIR
+            else configured_skills_dir
+        )
+        self.config_file = (
+            get_config_file()
+            if configured_config_file == _INITIAL_CONFIG_FILE
+            else configured_config_file
+        )
         self.config = self._load_config()
 
     def _load_config(self) -> dict:
-        if CONFIG_FILE.exists():
+        if self.config_file.exists():
             try:
-                return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+                return json.loads(self.config_file.read_text(encoding="utf-8"))
             except Exception as e:
-                logger.warning(f"Failed to load {CONFIG_FILE}, using defaults: {e}")
+                logger.warning(f"Failed to load {self.config_file}, using defaults: {e}")
         return {"skills": {"enabled": [], "installed": {}}}
 
     def _save_config(self) -> None:
@@ -68,12 +85,31 @@ class SkillInstaller:
         self.config["skills"].setdefault("enabled", [])
         self.config["skills"].setdefault("installed", {})
         try:
-            CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-            CONFIG_FILE.write_text(
+            self.config_file.parent.mkdir(parents=True, exist_ok=True)
+            self.config_file.write_text(
                 json.dumps(self.config, indent=2, ensure_ascii=False), encoding="utf-8"
             )
         except Exception as e:
-            logger.error(f"Failed to save config to {CONFIG_FILE}: {e}")
+            logger.error(f"Failed to save config to {self.config_file}: {e}")
+
+    def _find_discovered_skill_dir(self, skill_name: str) -> Optional[Path]:
+        """Find an installed, bundled, or legacy skill without exposing paths."""
+
+        candidates = [self.skills_dir]
+        candidates.extend(Path(path) for path in get_skill_dirs())
+        seen: set[Path] = set()
+        for base in candidates:
+            try:
+                base = base.resolve()
+                target = (base / skill_name).resolve()
+                if base in seen or target.parent != base:
+                    continue
+                seen.add(base)
+                if target.is_dir() and (target / "SKILL.md").is_file():
+                    return target
+            except (OSError, ValueError):
+                continue
+        return None
 
     @staticmethod
     def _expand_repo_url(repo_url: str) -> str:
@@ -437,12 +473,12 @@ print(json.dumps(missing))
                 "message": f"Invalid skill name '{skill_name}'. Only alphanumeric, hyphens, and underscores are allowed.",
             }
 
-        SKILLS_DIR.mkdir(parents=True, exist_ok=True)
-        target_dir = SKILLS_DIR / skill_name
+        self.skills_dir.mkdir(parents=True, exist_ok=True)
+        target_dir = self.skills_dir / skill_name
 
         try:
             resolved = target_dir.resolve()
-            if not str(resolved).startswith(str(SKILLS_DIR.resolve())):
+            if not str(resolved).startswith(str(self.skills_dir.resolve())):
                 return {
                     "status": "error",
                     "message": "Path traversal detected in skill name.",
@@ -511,7 +547,7 @@ print(json.dumps(missing))
                 "message": f"Skill '{skill_name}' is not installed.",
             }
 
-        target_dir = SKILLS_DIR / skill_name
+        target_dir = self.skills_dir / skill_name
         if target_dir.exists():
             shutil.rmtree(target_dir, ignore_errors=True)
 
@@ -535,7 +571,7 @@ print(json.dumps(missing))
                 "message": f"Skill '{skill_name}' is not installed.",
             }
 
-        target_dir = SKILLS_DIR / skill_name
+        target_dir = self.skills_dir / skill_name
         if not target_dir.exists():
             return {
                 "status": "error",
@@ -578,8 +614,8 @@ print(json.dumps(missing))
 
     def enable(self, skill_name: str) -> dict:
         """Enable an installed skill."""
-        skill_dir = SKILLS_DIR / skill_name
-        if not skill_dir.exists():
+        skill_dir = self._find_discovered_skill_dir(skill_name)
+        if skill_dir is None:
             return {
                 "status": "error",
                 "message": f"Skill '{skill_name}' not found.",
@@ -619,8 +655,8 @@ print(json.dumps(missing))
 
         if skill_name:
             # Single skill
-            skill_dir = SKILLS_DIR / skill_name
-            if not skill_dir.exists():
+            skill_dir = self._find_discovered_skill_dir(skill_name)
+            if skill_dir is None:
                 return {
                     "status": "error",
                     "message": f"Skill '{skill_name}' not found.",
@@ -680,7 +716,7 @@ print(json.dumps(missing))
             all_dirs = []
 
             for name in enabled:
-                skill_dir = SKILLS_DIR / name
+                skill_dir = self.skills_dir / name
                 if skill_dir.exists():
                     all_dirs.append((name, skill_dir))
 
@@ -723,8 +759,8 @@ print(json.dumps(missing))
         skills = []
 
         # List LimeBot Skills
-        if SKILLS_DIR.exists():
-            for folder in sorted(SKILLS_DIR.iterdir()):
+        if self.skills_dir.exists():
+            for folder in sorted(self.skills_dir.iterdir()):
                 if not folder.is_dir() or folder.name.startswith(("__", ".")):
                     continue
 

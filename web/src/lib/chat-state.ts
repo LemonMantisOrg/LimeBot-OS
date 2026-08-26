@@ -1,3 +1,5 @@
+export type TurnStatus = 'running' | 'completed' | 'retrying' | 'failed' | 'blocked' | 'cancelled';
+
 export type ChatToolExecution = {
   tool: string;
   status:
@@ -12,6 +14,7 @@ export type ChatToolExecution = {
   result?: string;
   tool_call_id: string;
   conf_id?: string;
+  turnStatus?: TurnStatus;
   logs?: string[];
   preview?: {
     kind: string;
@@ -83,6 +86,7 @@ export type ChatMessage = {
   variant?: 'default' | 'destructive' | 'warning';
   messageId?: string;
   turnId?: string;
+  turnStatus?: TurnStatus;
   voiceUrl?: string;
 };
 
@@ -99,6 +103,7 @@ type StreamDelta = MessageTarget & {
 type FinalText = MessageTarget & {
   content: string;
   variant: 'default' | 'destructive' | 'warning';
+  turnStatus?: TurnStatus;
   image?: string | null;
   attachments?: ChatAttachment[];
   voiceUrl?: string;
@@ -340,6 +345,7 @@ export function applyFinalAssistantMessage(
         voiceUrl: payload.voiceUrl,
         messageId: payload.messageId || undefined,
         turnId: payload.turnId || undefined,
+        turnStatus: payload.turnStatus,
       },
     ];
   }
@@ -366,6 +372,7 @@ export function applyFinalAssistantMessage(
     voiceUrl: payload.voiceUrl ?? existing.voiceUrl,
     messageId: payload.messageId || existing.messageId,
     turnId: payload.turnId || existing.turnId,
+    turnStatus: payload.turnStatus || updated[index].turnStatus,
   };
   return updated;
 }

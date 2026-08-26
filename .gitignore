@@ -82,6 +82,7 @@ persona/USER.md
 !.claude/agents/.gitkeep
 .limebot/agents/*
 !.limebot/agents/.gitkeep
+.limebot/skills/
 
 # Logs
 /logs/

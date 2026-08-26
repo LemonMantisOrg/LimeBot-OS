@@ -15,6 +15,7 @@ import {
     ShieldAlert
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import type { TurnStatus } from "@/lib/chat-state";
 
 export interface ConfirmationPreview {
     kind: string;
@@ -39,6 +40,7 @@ export interface ToolExecution {
     result?: string;
     tool_call_id: string;
     conf_id?: string;
+    turnStatus?: TurnStatus;
     logs?: string[];
     preview?: ConfirmationPreview;
 }

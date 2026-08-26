@@ -1,9 +1,10 @@
 """Runtime-owned paths that should not need to live in the Git checkout.
 
-The default remains the project root for backwards compatibility.  Set
-``LIMEBOT_STATE_DIR`` to move mutable configuration, persona data, and custom
-skills to a user-owned directory; the updater can then replace the checkout
-without touching that state.
+The project root remains the default state directory for backwards-compatible
+persona/config paths. Skills are the exception: newly created or installed
+skills live under ``.limebot/skills`` unless ``LIMEBOT_STATE_DIR`` is set.
+That gives the updater a clean checkout boundary while the loader continues
+to discover the legacy ``skills/`` directory.
 """
 
 import os
@@ -43,7 +44,22 @@ def get_data_dir() -> Path:
 
 
 def get_skills_dir() -> Path:
-    return get_state_dir() / "skills"
+    """Return the writable directory for newly created/installed skills."""
+
+    return get_local_skills_dir()
+
+
+def get_local_skills_dir() -> Path:
+    """Return the user-owned skill directory.
+
+    ``LIMEBOT_STATE_DIR`` explicitly opts the whole runtime into an external
+    state directory. Without it, keep state-compatible files in the project
+    root but put mutable skills in the ignored ``.limebot`` namespace.
+    """
+
+    if str(os.getenv("LIMEBOT_STATE_DIR") or "").strip():
+        return get_state_dir() / "skills"
+    return PROJECT_DIR / ".limebot" / "skills"
 
 
 def get_plugins_dir() -> Path:
@@ -68,7 +84,7 @@ def get_skill_dirs() -> list[Path]:
     """Return shipped skills, user-owned skills, and installed plugin skills."""
 
     project_skills = PROJECT_DIR / "skills"
-    state_skills = get_skills_dir()
+    state_skills = get_local_skills_dir()
     dirs = [project_skills]
     if state_skills != project_skills:
         dirs.append(state_skills)

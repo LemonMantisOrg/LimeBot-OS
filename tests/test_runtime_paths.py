@@ -17,4 +17,10 @@ def test_default_state_dir_remains_project_root(monkeypatch):
 
     monkeypatch.delenv("LIMEBOT_STATE_DIR", raising=False)
     assert runtime_paths.get_state_dir() == runtime_paths.PROJECT_DIR
-    assert runtime_paths.get_skill_dirs() == [Path(runtime_paths.PROJECT_DIR / "skills")]
+    assert runtime_paths.get_skills_dir() == (
+        runtime_paths.PROJECT_DIR / ".limebot" / "skills"
+    )
+    assert runtime_paths.get_skill_dirs() == [
+        Path(runtime_paths.PROJECT_DIR / "skills"),
+        runtime_paths.PROJECT_DIR / ".limebot" / "skills",
+    ]

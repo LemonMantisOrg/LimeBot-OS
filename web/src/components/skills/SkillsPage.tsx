@@ -13,9 +13,11 @@ interface Skill {
     id: string;
     name: string;
     description: string;
-    path: string;
+    path?: string;
     enabled: boolean;
     active: boolean;
+    source_kind?: 'bundled' | 'git-managed' | 'local' | 'legacy-local' | string;
+    editable?: boolean;
     deps_ok?: boolean;
     missing_deps?: {
         python?: string[];
@@ -206,7 +208,7 @@ export function SkillsPage() {
                 )}
                 <div className="mt-4 pt-4 border-t border-border flex items-center justify-between text-xs text-muted-foreground font-mono">
                     <span className="truncate max-w-[150px] opacity-70">
-                        skills/{skill.id}
+                        {skill.source_kind || 'local'}{skill.editable ? ' · editable' : ' · read-only'}
                     </span>
                     {isRunnable ? (
                         <span className="flex items-center gap-1 text-primary">

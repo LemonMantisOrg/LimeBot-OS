@@ -18,6 +18,7 @@ import {
     applyStopTyping,
     type ChatAttachment,
     type ChatMessage,
+    type TurnStatus,
     getUserTurnIndex,
     upsertChangeSet,
     upsertToolExecution,
@@ -54,6 +55,20 @@ const EMPTY_STREAM_RENDER_STATE: StreamRenderState = {
     thinkingRendered: false,
 };
 
+const normalizeTurnStatus = (value: unknown): TurnStatus => {
+    switch (value) {
+        case 'running':
+        case 'completed':
+        case 'retrying':
+        case 'failed':
+        case 'blocked':
+        case 'cancelled':
+            return value;
+        default:
+            return 'completed';
+    }
+};
+
 export function useWebSocket({
     onIdentityUpdated,
     onRateLimit,
@@ -64,6 +79,7 @@ export function useWebSocket({
     const [inputValue, setInputValue] = useState('');
     const [isConnected, setIsConnected] = useState(false);
     const [isTyping, setIsTyping] = useState(false);
+    const [turnStatuses, setTurnStatuses] = useState<Record<string, TurnStatus>>({});
     const [sessionId, setSessionId] = useState(() => crypto.randomUUID());
 
     const ws = useRef<WebSocket | null>(null);
@@ -126,6 +142,15 @@ export function useWebSocket({
         return `${chatId}:${messageId || turnId}`;
     };
 
+    const turnStatusKey = (
+        chatId: string | undefined,
+        turnId: string | undefined,
+        messageId: string | undefined,
+    ) => {
+        if (!chatId || (!turnId && !messageId)) return null;
+        return `${chatId}:${turnId || messageId}`;
+    };
+
     const rememberSettledStream = (key: string | null) => {
         if (!key) return;
         const settled = settledStreamKeysRef.current;
@@ -156,6 +181,20 @@ export function useWebSocket({
                 thinkingDelta: thinking,
             })
         );
+    };
+
+    const rememberTurnStatus = (
+        chatId: string | undefined,
+        turnId: string | undefined,
+        messageId: string | undefined,
+        status: TurnStatus,
+    ) => {
+        const key = turnStatusKey(chatId, turnId, messageId);
+        if (!key) return;
+        setTurnStatuses((previous) => {
+            if (previous[key] === status) return previous;
+            return { ...previous, [key]: status };
+        });
     };
 
     const queueStreamDelta = (
@@ -219,6 +258,7 @@ export function useWebSocket({
         streamBufferRef.current = { chatId: null, messageId: null, turnId: null, content: '', thinking: '' };
         streamRenderStateRef.current = EMPTY_STREAM_RENDER_STATE;
         settledStreamKeysRef.current.clear();
+        setTurnStatuses({});
     }, [sessionId]);
 
     // ── WebSocket connect ─────────────────────────────────────────────────
@@ -346,14 +386,91 @@ export function useWebSocket({
                         return;
                     }
 
+                    const isTerminalEvent =
+                        data.type === 'turn_terminal' || streamType === 'turn_terminal';
+                    if (isTerminalEvent) {
+                        // Flush deltas that arrived before the terminal fence.
+                        // The old discard here silently lost the final buffered
+                        // 32ms of text, which made completed replies look
+                        // truncated. Once the fence is recorded, queueStreamDelta
+                        // rejects genuinely late chunks.
+                        flushStreamBuffer();
+                        const terminalKey = streamKey(eventChatId, eventMessageId, eventTurnId);
+                        rememberSettledStream(terminalKey);
+                        const status = normalizeTurnStatus(data.metadata?.turn_status || data.turn_status);
+                        rememberTurnStatus(eventChatId, eventTurnId, eventMessageId, status);
+                        setIsTyping(false);
+                        setMessages((previous) => previous.map((message) => {
+                            const sameTurn = Boolean(
+                                (eventTurnId && message.turnId === eventTurnId) ||
+                                (eventMessageId && message.messageId === eventMessageId)
+                            );
+                            if (!sameTurn) return message;
+                            const execution = message.toolExecution;
+                            const activeTool = execution && (
+                                execution.status === 'running' ||
+                                execution.status === 'planned'
+                            );
+                            return {
+                                ...message,
+                                turnStatus: status,
+                                toolExecution: execution
+                                    ? {
+                                        ...execution,
+                                        turnStatus: status,
+                                        ...(activeTool && status !== 'blocked'
+                                            ? {
+                                                status: status === 'completed' ? 'completed' : 'error',
+                                                result: status === 'completed'
+                                                    ? execution.result
+                                                    : execution.result || `Turn ended with status: ${status}.`,
+                                            }
+                                            : {}),
+                                    }
+                                    : execution,
+                            };
+                        }));
+                        return;
+                    }
+
                     flushStreamBuffer();
 
                     if (data.type === 'message') {
+                        const eventKind = String(data.metadata?.event_kind || '').trim();
+                        const isProgressMessage =
+                            data.metadata?.terminal !== true &&
+                            eventKind !== 'assistant_message' &&
+                            Boolean(data.metadata?.is_warning);
+                        if (isProgressMessage) {
+                            // Provider failover/retry notices are visible
+                            // progress, not a completed assistant turn. Keep
+                            // the stream open so the eventual model response
+                            // can replace this temporary snapshot.
+                            setIsTyping(true);
+                            setMessages(prev =>
+                                applyStreamSnapshot(prev, {
+                                    messageId: eventMessageId,
+                                    turnId: eventTurnId,
+                                    content: data.content || '',
+                                })
+                            );
+                            return;
+                        }
+                        const isTransportError =
+                            data.type === 'error' ||
+                            eventKind === 'transport_error' ||
+                            Boolean(data.metadata?.error_code);
+                        const status = normalizeTurnStatus(
+                            data.metadata?.turn_status || (isTransportError ? 'failed' : 'completed'),
+                        );
                         rememberSettledStream(streamKey(eventChatId, eventMessageId, eventTurnId));
+                        rememberTurnStatus(eventChatId, eventTurnId, eventMessageId, status);
                         setIsTyping(false);
                         let variant: 'default' | 'destructive' | 'warning' = 'default';
-                        if (data.metadata?.is_error) variant = 'destructive';
-                        if (data.metadata?.is_warning) variant = 'warning';
+                        if (isTransportError) variant = 'destructive';
+                        if (data.metadata?.is_warning || status === 'retrying' || status === 'blocked') {
+                            variant = 'warning';
+                        }
 
                         setMessages(prev =>
                             applyFinalAssistantMessage(prev, {
@@ -361,6 +478,7 @@ export function useWebSocket({
                                 turnId: eventTurnId,
                                 content: data.content,
                                 variant,
+                                turnStatus: status,
                                 image: typeof data.metadata?.image === 'string' ? data.metadata.image : null,
                                 attachments: normalizeIncomingAttachments(data.metadata?.attachments),
                                 voiceUrl: typeof data.metadata?.voice_url === 'string' ? data.metadata.voice_url : undefined,
@@ -387,6 +505,7 @@ export function useWebSocket({
                         }
                     } else if (data.type === 'cancellation' || data.metadata?.is_cancellation) {
                         rememberSettledStream(streamKey(eventChatId, eventMessageId, eventTurnId));
+                        rememberTurnStatus(eventChatId, eventTurnId, eventMessageId, 'cancelled');
                         setIsTyping(false);
                         setMessages(prev => prev.map(m => {
                             if (m.type === 'tool' && m.toolExecution?.status === 'running') {
@@ -398,8 +517,20 @@ export function useWebSocket({
                             return m;
                         }));
                     } else if (data.type === 'stop_typing' || data.metadata?.type === 'stop_typing') {
+                        const terminal = data.metadata?.terminal === true;
+                        if (terminal) {
+                            flushStreamBuffer();
+                            rememberSettledStream(streamKey(eventChatId, eventMessageId, eventTurnId));
+                            rememberTurnStatus(
+                                eventChatId,
+                                eventTurnId,
+                                eventMessageId,
+                                normalizeTurnStatus(data.metadata?.turn_status),
+                            );
+                        } else {
+                            flushStreamBuffer();
+                        }
                         setIsTyping(false);
-                        flushStreamBuffer();
                         setMessages(prev => applyStopTyping(prev, { messageId: eventMessageId, turnId: eventTurnId }));
                     } else if (data.type === 'typing' || data.metadata?.type === 'typing') {
                         setIsTyping(true);
@@ -407,6 +538,10 @@ export function useWebSocket({
                         console.error('Rate Limit Error:', data.metadata?.details);
                         onRateLimit();
                     } else if (data.type === 'tool_execution') {
+                        const toolStreamKey = streamKey(eventChatId, eventMessageId, eventTurnId);
+                        if (toolStreamKey && settledStreamKeysRef.current.has(toolStreamKey)) {
+                            return;
+                        }
                         const toolData = data.metadata;
                         setMessages(prev =>
                             upsertToolExecution(prev, {
@@ -597,6 +732,7 @@ export function useWebSocket({
         setInputValue,
         isConnected,
         isTyping,
+        turnStatuses,
         sessionId,
         connectWebSocket,
         handleSendMessage,

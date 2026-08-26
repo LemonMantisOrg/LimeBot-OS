@@ -162,6 +162,7 @@ function App() {
     setInputValue,
     isConnected,
     isTyping,
+    turnStatuses,
     sessionId,
     connectWebSocket,
     handleSendMessage,
@@ -458,6 +459,7 @@ function App() {
               inputValue={inputValue}
               isConnected={isConnected}
               isTyping={isTyping}
+              turnStatuses={turnStatuses}
               botIdentity={botIdentity}
               activeChatId={sessionId}
               activityText={activity?.text || null}
