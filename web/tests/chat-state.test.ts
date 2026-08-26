@@ -286,3 +286,37 @@ test("change set updates survive out-of-order progress and retain the terminal s
   assert.equal(staleProgress.length, 1);
   assert.equal(staleProgress[0].changeSet?.status, "verified");
 });
+
+test("send_media image envelope merges into the same assistant bubble", () => {
+  const initial: ChatMessage[] = [
+    {
+      sender: "bot",
+      content: "Here you go.",
+      isStreaming: false,
+      messageId: "msg-media",
+      turnId: "turn-media",
+    },
+  ];
+
+  const withImage = applyFinalAssistantMessage(initial, {
+    messageId: "msg-media",
+    turnId: "turn-media",
+    content: "Rosé",
+    variant: "default",
+    image: "/temp/downloads/rose.jpg",
+    attachments: [
+      {
+        name: "rose.jpg",
+        mimeType: "image/jpeg",
+        kind: "image",
+        url: "/temp/downloads/rose.jpg",
+      },
+    ],
+  });
+
+  assert.equal(withImage.length, 1);
+  assert.equal(withImage[0].content, "Here you go.");
+  assert.equal(withImage[0].image, "/temp/downloads/rose.jpg");
+  assert.equal(withImage[0].attachments?.[0].kind, "image");
+  assert.equal(withImage[0].attachments?.[0].url, "/temp/downloads/rose.jpg");
+});

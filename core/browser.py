@@ -36,6 +36,82 @@ BROWSER_INSTALL_HINT = (
     " (or: npm run lime-bot feature install browser && npm run install-browser)."
 )
 
+# Bing Images stores original URLs in the `m` JSON attribute on result tiles.
+_BING_IMAGE_EXTRACT_JS = """
+() => {
+    const out = [];
+    const seen = new Set();
+    const nodes = document.querySelectorAll('a.iusc, a[m], .iusc');
+    for (const a of nodes) {
+        let meta = {};
+        const raw = a.getAttribute('m');
+        if (raw) {
+            try { meta = JSON.parse(raw); } catch (e) { meta = {}; }
+        }
+        const imageUrl = meta.murl || meta.mediaurl || '';
+        if (!imageUrl || seen.has(imageUrl)) continue;
+        seen.add(imageUrl);
+        out.push({
+            title: meta.t || a.getAttribute('aria-label') || '',
+            image_url: imageUrl,
+            thumbnail_url: meta.turl || '',
+            source_page: meta.purl || '',
+            width: parseInt(meta.w || '0', 10) || 0,
+            height: parseInt(meta.h || '0', 10) || 0,
+        });
+    }
+    return out;
+}
+"""
+
+# Google Images: original URLs live in imgres?imgurl= and occasional "ou" JSON.
+_GOOGLE_IMAGE_EXTRACT_JS = """
+() => {
+    const out = [];
+    const seen = new Set();
+    const push = (imageUrl, title, thumb, source, width, height) => {
+        if (!imageUrl || !imageUrl.startsWith('http') || seen.has(imageUrl)) return;
+        const lower = imageUrl.toLowerCase();
+        if (lower.includes('encrypted-tbn') || lower.includes('gstatic.com')) return;
+        seen.add(imageUrl);
+        out.push({
+            title: title || '',
+            image_url: imageUrl,
+            thumbnail_url: thumb || '',
+            source_page: source || '',
+            width: width || 0,
+            height: height || 0,
+        });
+    };
+    for (const a of document.querySelectorAll('a[href*="imgurl="], a[href*="/imgres"]')) {
+        try {
+            const u = new URL(a.href, location.origin);
+            const imgurl = u.searchParams.get('imgurl') || '';
+            const imgref = u.searchParams.get('imgrefurl') || '';
+            const img = a.querySelector('img');
+            push(
+                imgurl,
+                (img && (img.alt || img.title)) || a.getAttribute('aria-label') || '',
+                (img && (img.currentSrc || img.src || img.getAttribute('data-src'))) || '',
+                imgref,
+                img ? (img.naturalWidth || img.width || 0) : 0,
+                img ? (img.naturalHeight || img.height || 0) : 0
+            );
+        } catch (e) {}
+    }
+    const html = document.documentElement ? document.documentElement.innerHTML : '';
+    const re = /"ou":"(https?:[^"]+)"/g;
+    let match;
+    while ((match = re.exec(html)) && out.length < 40) {
+        try {
+            const url = JSON.parse('"' + match[1] + '"');
+            push(url, '', '', '', 0, 0);
+        } catch (e) {}
+    }
+    return out;
+}
+"""
+
 
 def browser_unavailable_message() -> str:
     return BROWSER_INSTALL_HINT
@@ -1336,18 +1412,35 @@ class BrowserManager:
                 logger.error(f"Media extraction failed: {e}")
                 return {"success": False, "error": str(e)}
 
-    async def google_search(self, query: str, on_progress=None) -> Dict[str, Any]:
-        """Search Google and return structured results."""
+    async def google_search(
+        self,
+        query: str,
+        on_progress=None,
+        count: int = 8,
+        kind: str = "web",
+    ) -> Dict[str, Any]:
+        """Search Google (web or news) and return structured results."""
         async with self._action_lock:
             page = await self._ensure_browser()
 
             try:
+                try:
+                    limit = max(1, min(int(count), 20))
+                except (TypeError, ValueError):
+                    limit = 8
+                news = str(kind or "web").strip().lower() == "news"
+                label = "Google News" if news else "Google"
                 if on_progress:
-                    await on_progress(f"🔍 Searching Google for: {query}")
-                logger.info(f"Google search: {query}")
+                    await on_progress(f"🔍 Searching {label} for: {query}")
+                logger.info(f"{label} search: {query}")
 
                 encoded_query = urllib.parse.quote_plus(query)
-                await page.goto(f"https://www.google.com/search?q={encoded_query}")
+                search_url = (
+                    f"https://www.google.com/search?q={encoded_query}&hl=en&pws=0"
+                )
+                if news:
+                    search_url += "&tbm=nws"
+                await page.goto(search_url)
                 await page.wait_for_timeout(1000)
 
                 if on_progress:
@@ -1359,7 +1452,7 @@ class BrowserManager:
                 # the comparatively stable result shape (a link containing an h3)
                 # and use the legacy container selector only as a fallback.
                 result_links = await page.query_selector_all("a:has(h3)")
-                for link_elem in result_links[:12]:
+                for link_elem in result_links[: max(limit * 2, 12)]:
                     title_elem = await link_elem.query_selector("h3")
                     url = await link_elem.get_attribute("href")
                     if not title_elem or not url or not url.startswith(("http://", "https://")):
@@ -1379,11 +1472,11 @@ class BrowserManager:
                     except Exception:
                         snippet = ""
                     results.append({"title": title, "url": url, "snippet": snippet})
-                    if len(results) >= 5:
+                    if len(results) >= limit:
                         break
 
                 if not results:
-                    for container in (await page.query_selector_all("div.g"))[:8]:
+                    for container in (await page.query_selector_all("div.g"))[: max(limit * 2, 8)]:
                         title_elem = await container.query_selector("h3")
                         link_elem = await container.query_selector("a")
                         snippet_elem = await container.query_selector("div.VwiC3b")
@@ -1403,6 +1496,8 @@ class BrowserManager:
                                     else "",
                                 }
                             )
+                            if len(results) >= limit:
+                                break
 
                 if not results:
                     text = await page.inner_text("body")
@@ -1438,6 +1533,102 @@ class BrowserManager:
 
             except Exception as e:
                 logger.error(f"Google search failed: {e}")
+                return {"success": False, "error": str(e)}
+
+    async def image_search(
+        self, query: str, on_progress=None, count: int = 8
+    ) -> Dict[str, Any]:
+        """Find original image URLs via Bing Images, then Google Images."""
+        async with self._action_lock:
+            page = await self._ensure_browser()
+            try:
+                try:
+                    limit = max(1, min(int(count), 20))
+                except (TypeError, ValueError):
+                    limit = 8
+                encoded_query = urllib.parse.quote_plus(query)
+                images: List[Dict[str, Any]] = []
+
+                if on_progress:
+                    await on_progress(f"🔍 Searching images for: {query}")
+                logger.info(f"Image search: {query}")
+
+                bing_url = (
+                    f"https://www.bing.com/images/search?q={encoded_query}&form=HDRSC2"
+                )
+                await page.goto(bing_url)
+                await page.wait_for_timeout(1200)
+                try:
+                    await page.mouse.wheel(0, 1800)
+                    await page.wait_for_timeout(400)
+                except Exception:
+                    pass
+                try:
+                    images = await page.evaluate(_BING_IMAGE_EXTRACT_JS)
+                except Exception as eval_error:
+                    logger.warning(f"Bing image extract failed: {eval_error}")
+                    images = []
+                if not isinstance(images, list):
+                    images = []
+
+                if len(images) < 2:
+                    if on_progress:
+                        await on_progress("📄 Trying Google Images...")
+                    google_url = (
+                        "https://www.google.com/search"
+                        f"?tbm=isch&q={encoded_query}&hl=en&pws=0"
+                    )
+                    await page.goto(google_url)
+                    await page.wait_for_timeout(1200)
+                    try:
+                        await page.mouse.wheel(0, 1800)
+                        await page.wait_for_timeout(400)
+                    except Exception:
+                        pass
+                    try:
+                        extra = await page.evaluate(_GOOGLE_IMAGE_EXTRACT_JS)
+                    except Exception as eval_error:
+                        logger.warning(f"Google image extract failed: {eval_error}")
+                        extra = []
+                    if isinstance(extra, list) and extra:
+                        images = extra
+
+                cleaned: List[Dict[str, Any]] = []
+                seen = set()
+                for item in images:
+                    if not isinstance(item, dict):
+                        continue
+                    url = str(item.get("image_url") or "").strip()
+                    if not url.startswith(("http://", "https://")):
+                        continue
+                    lower = url.lower()
+                    if "encrypted-tbn" in lower or "gstatic.com" in lower:
+                        continue
+                    if url in seen:
+                        continue
+                    seen.add(url)
+                    cleaned.append(item)
+                    if len(cleaned) >= limit:
+                        break
+
+                if not cleaned:
+                    return {
+                        "success": False,
+                        "query": query,
+                        "images": [],
+                        "error": "Image results were present but could not be parsed.",
+                    }
+
+                if on_progress:
+                    await on_progress(f"✅ Found {len(cleaned)} images.")
+                return {
+                    "success": True,
+                    "query": query,
+                    "images": cleaned,
+                }
+
+            except Exception as e:
+                logger.error(f"Image search failed: {e}")
                 return {"success": False, "error": str(e)}
 
     async def press_key(self, key: str) -> Dict[str, Any]:

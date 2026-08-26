@@ -425,21 +425,12 @@ class Toolbox:
             except Exception as e:
                 logger.warning(f"Failed to read subagent registry: {e}")
 
-        # Search tools are available when a search API key is configured
-        # (browser-skill enablement is handled inside build_tool_definitions).
-        search_available = False
-        try:
-            from core.web_search import search_api_configured
-
-            search_available = search_api_configured(self.config)
-        except Exception:
-            search_available = False
-
-        # Base tools from tool_defs.py
+        # Search tools always stay registered; missing Playwright fails at
+        # execution with BROWSER_INSTALL_HINT rather than hiding the tools.
         tools = build_tool_definitions(
             enabled_skills,
             available_agents=available_agents,
-            search_available=search_available,
+            search_available=True,
         )
 
         # Load MCP tools dynamically
@@ -2784,6 +2775,12 @@ class Toolbox:
         metadata: Dict[str, Any] = {"attachments": [attachment]}
         if is_image and url:
             metadata["image"] = url
+        turn_id = str(ctx.get("turn_id") or "").strip()
+        message_id = str(ctx.get("message_id") or "").strip()
+        if turn_id:
+            metadata["turn_id"] = turn_id
+        if message_id:
+            metadata["message_id"] = message_id
         await self.bus.publish_outbound(
             OutboundMessage(
                 channel="web", chat_id=chat_id, content=caption, metadata=metadata
@@ -2847,6 +2844,17 @@ class Toolbox:
 
         caption = str(caption or "").strip()
 
+        outbound_meta: Dict[str, Any] = {
+            "type": "file",
+            "file_path": str(resolved),
+            "caption": caption,
+        }
+        if turn_id:
+            outbound_meta["turn_id"] = turn_id
+        message_id = str(ctx.get("message_id") or "").strip()
+        if message_id:
+            outbound_meta["message_id"] = message_id
+
         if channel == "web":
             await self._publish_web_media(resolved, caption)
             if turn_id:
@@ -2858,11 +2866,7 @@ class Toolbox:
                 channel=channel,
                 chat_id=chat_id,
                 content="",
-                metadata={
-                    "type": "file",
-                    "file_path": str(resolved),
-                    "caption": caption,
-                },
+                metadata=outbound_meta,
             )
         )
         if turn_id:

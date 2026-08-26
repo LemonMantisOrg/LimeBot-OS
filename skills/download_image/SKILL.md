@@ -10,7 +10,9 @@ dependencies:
 ---
 
 # Image Downloader (Honey Badger Edition) 🖼️
-This skill is designed to be resilient. It doesn't trust HTTP headers; it trusts the actual file bytes. Use this to download images from the web even when servers try to block bots or serve incorrect MIME types.
+Use this skill only when a **direct image URL or page URL is already known** and native `send_media` cannot fetch it (strict CDN, HTML interstitial, wrong Content-Type).
+
+For ordinary chat requests such as "download a picture of X and send it in this chat", do **not** use this skill. Call native `image_search` then `send_media(path=<Image URL>)` instead. Do not use `run_command` or markdown image links for that path.
 
 ### 🛡️ Robust Features:
 1.  **Byte Sniffing**: Ignores `Content-Type` headers (often `binary/octet-stream`) and checks the file signature (magic numbers) to detect JPEGs, PNGs, GIFs, and WEBPs.

@@ -13,6 +13,7 @@ from typing import Optional, Any
 
 from loguru import logger
 
+from core.media_intent import MEDIA_DELIVERY_RULES
 from core.paths import (
     USERS_DIR,
     MEMORY_DIR,
@@ -741,8 +742,10 @@ def build_stable_system_prompt(
         f"you can use the following tags to overwrite the respective files:\n"
         f"<save_soul>...new markdown content...</save_soul>\n"
         f"<save_identity>...new markdown content...</save_identity>\n"
-        f"If the user gives you a direct avatar/profile image URL, do NOT browse, search, or download it. "
-        f"Copy that exact URL into `**Pfp_URL:**` inside `<save_identity>`.\n"
+        f"When the user is setting YOUR avatar/profile picture and pastes a direct image URL, "
+        f"do NOT browse, search, or download it — copy that exact URL into `**Pfp_URL:**` "
+        f"inside `<save_identity>`. This identity-only rule does NOT apply when they ask you "
+        f"to send, download, or share a photo into the current chat.\n"
         f"For identity, you can specify platform styles using: `**Discord Style:** ...`, `**Telegram Style:** ...`, `**WhatsApp Style:** ...`, `**Web Style:** ...` and `**Reaction Emojis:** bucket:emoji,emoji;...`\n"
         f"--- SELF-EVOLUTION ---\n"
         f"Your SOUL.md defines your core personality. If you realize your current Soul no longer fits the user's needs "
@@ -803,6 +806,7 @@ def build_stable_system_prompt(
 
     base_prompt += (
         "\n--- TOOL USAGE RULES ---\n"
+        f"{MEDIA_DELIVERY_RULES}"
         "You have tools available (read_file, edit_file, verify_files, diagnose_files, write_file, list_dir, run_command, etc.). "
         "Use them through the tool-calling API — NEVER by writing JSON blocks, describing commands, or narrating actions in your message text.\n"
         "XML tags are only for the supported side-effect tags like <save_soul>, <save_identity>, <save_user>, <save_mood>, <save_relationship>, <log_memory>, <save_memory>, <discord_send>, and <discord_embed>. "
@@ -815,7 +819,7 @@ def build_stable_system_prompt(
         "For an Excel/XLSX request, CALL create_spreadsheet directly, verify its success result, then CALL send_media with the same path. Do not write and run an ad-hoc workbook script.\n"
         "For research artifacts, keep every field consistent with its evidence: if a fact was not verified, write the literal value 'Unverified' in that field. Never place a numeric claim in a field while saying in notes that the same fact was unavailable or unverified.\n"
         "For a comparison across named providers or products, do not rely on one broad deep_research call. Run a separate web_search scoped to each provider's official domain, open the most relevant official result when snippets are insufficient, and only then build the comparison artifact.\n"
-        "CAPABILITY ROUTING: A compact capability inventory is included above. Capability names and readiness are separate facts: discovered does not mean enabled, ready does not prove external credentials, and an unavailable tool result does not prove the capability is absent. Before claiming that an integration, skill, MCP tool, or specialist is unavailable, call the always-available `capability_search` tool with the exact task/name. Keep using the capability selected for the active task across terse follow-ups such as 'yes', 'sí la tienes', or 'go ahead'.\n"
+        "CAPABILITY ROUTING: A compact capability inventory may be included above. Capability names and readiness are separate facts: discovered does not mean enabled, ready does not prove external credentials, and an unavailable tool result does not prove the capability is absent. Before claiming that an integration, skill, MCP tool, or specialist is unavailable, call `capability_search` with the exact task/name. Do NOT call `capability_search` for native chat photo delivery — that is `image_search` then `send_media`. Keep using the capability selected for the active task across terse follow-ups such as 'yes', 'sí la tienes', or 'go ahead'.\n"
         "When the user provides a URL, asks for current research, or asks you to operate a website, you MUST call an available browser/search tool before answering. "
         "For exports or downloads, continue with browser_download and the available file/command tools until the artifact is inspected and delivered. "
         "Never claim that this environment cannot browse, click, download, export, or capture something unless you attempted the relevant available tool and report its actual error.\n"
@@ -824,11 +828,13 @@ def build_stable_system_prompt(
         "Do not disable security controls or repeat an identical failure without new evidence. "
         "Report a blocker only after the same concrete blocker is independently confirmed and reasonable safe alternatives are exhausted.\n"
         "Your visible reply should contain ONLY your natural-language response to the user — never tool schemas, JSON payloads, or action narrations.\n"
-        "IMAGE GENERATION: When the user asks to create or transform an image, call generate_image. "
-        "If they attached an image or refer to the current/recent image, preserve it as a reference and set use_attached_images=true. "
+        "IMAGE GENERATION: Call generate_image only to create or transform a NEW picture (draw/render/generate/make an image). "
+        "Downloading, finding, or sending an existing photo of a real person or subject is MEDIA DELIVERY above, not generation. "
+        "If they attached an image or refer to the current/recent image for a transform, preserve it as a reference and set use_attached_images=true. "
         "Preserve requested proper names and subject identity in the tool prompt, including named public figures; do not replace them with an anonymous lookalike or invent a provider restriction. "
-        "If a provider rejects a request, report the provider's actual error instead of preemptively refusing or silently changing the subject.\n"
-        "Skill manuals may be injected separately when they are relevant to the current user request.\n"
+        "If a provider rejects a generate_image request, report the provider's actual error instead of preemptively refusing or silently changing the subject.\n"
+        "Skill manuals are injected only when they are relevant to the current user request. "
+        "Do not read or dump AGENTS.md into the conversation; it is developer documentation, not live chat policy.\n"
     )
 
     # user_text already loaded above

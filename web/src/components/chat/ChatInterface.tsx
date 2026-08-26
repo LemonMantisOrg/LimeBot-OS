@@ -21,6 +21,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { AlertTriangle, Info } from "lucide-react";
 import { toast } from "sonner";
 import type { ChatAttachment, ChatChangeSet } from "@/lib/chat-state";
+import { renderableAttachmentsForMessage } from "@/lib/chat-media";
 import { readinessLabel, type AgentReadiness } from "@/lib/agent-readiness";
 
 
@@ -480,11 +481,7 @@ const MemoizedMessageItem = memo(({
 }) => {
     const isUser = msg.sender === 'user';
     const isBot = msg.sender === 'bot';
-    const renderableAttachments = msg.attachments?.length
-        ? msg.attachments
-        : msg.image
-            ? [{ name: 'Uploaded image', mimeType: 'image/*', kind: 'image', url: msg.image } satisfies ChatAttachment]
-            : [];
+    const renderableAttachments = renderableAttachmentsForMessage(msg);
     const subagentReport = !isUser ? parseSubagentReport(msg.content) : null;
 
     if (msg.content?.includes('[CONFIRM_SESSION]') || msg.content?.includes('[CONFIRM_EXECUTION]') || msg.type === 'confirmation') {
@@ -553,8 +550,10 @@ const MemoizedMessageItem = memo(({
                             <div className={cn(
                                 "relative max-w-full overflow-hidden transition-all duration-200",
                                 isUser
-                                    ? "group max-w-[min(82%,30rem)] rounded-2xl rounded-tr-none bg-user-bubble px-3.5 py-2 text-[14px] leading-tight text-user-bubble-foreground shadow-sm transition-all duration-300 hover:shadow-md"
-                                    : "w-full bg-transparent px-0 py-0 text-foreground"
+                                    ? "group max-w-[min(82%,30rem)] rounded-2xl rounded-tr-md bg-user-bubble px-3.5 py-2 text-[14px] leading-tight text-user-bubble-foreground shadow-sm transition-all duration-300 hover:shadow-md"
+                                    : renderableAttachments.length > 0
+                                        ? "chat-media-bubble w-full max-w-[min(100%,28rem)] rounded-2xl rounded-tl-md border border-border/70 bg-muted/35 p-2 text-foreground shadow-sm"
+                                        : "w-full bg-transparent px-0 py-0 text-foreground"
                             )}>
                                 <div className="max-w-full overflow-x-auto whitespace-normal break-words">
                                     {renderableAttachments.map((attachment) => (
@@ -626,6 +625,8 @@ export function ChatInterface({
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [selectedAttachment, setSelectedAttachment] = useState<ChatAttachment | null>(null);
+    const [isDraggingFile, setIsDraggingFile] = useState(false);
+    const dragDepthRef = useRef(0);
     const [isAtBottom, setIsAtBottom] = useState(true);
     const [unreadAnchorIndex, setUnreadAnchorIndex] = useState<number | null>(null);
     const [unreadCount, setUnreadCount] = useState(0);
@@ -990,17 +991,20 @@ export function ChatInterface({
         });
     };
 
-    const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        if (!file) return;
-
+    const attachFile = async (file: File, failureTitle = "Attachment rejected") => {
         try {
             setSelectedAttachment(await fileToAttachment(file));
         } catch (error) {
             const description = error instanceof Error ? error.message : "Failed to attach file.";
-            toast.error("Attachment rejected", { description });
+            toast.error(failureTitle, { description });
             clearSelectedAttachment();
         }
+    };
+
+    const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        await attachFile(file);
     };
 
     const handlePaste = async (e: React.ClipboardEvent) => {
@@ -1009,16 +1013,43 @@ export function ChatInterface({
             if (items[i].type.indexOf('image') !== -1) {
                 const blob = items[i].getAsFile();
                 if (blob) {
-                    try {
-                        setSelectedAttachment(await fileToAttachment(blob));
-                    } catch (error) {
-                        const description = error instanceof Error ? error.message : "Failed to attach pasted image.";
-                        toast.error("Attachment rejected", { description });
-                    }
+                    await attachFile(blob, "Attachment rejected");
                     e.preventDefault();
                     break;
                 }
             }
+        }
+    };
+
+    const handleComposerDragEnter = (e: React.DragEvent) => {
+        e.preventDefault();
+        dragDepthRef.current += 1;
+        if (e.dataTransfer.types.includes("Files")) {
+            setIsDraggingFile(true);
+        }
+    };
+
+    const handleComposerDragOver = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+    };
+
+    const handleComposerDragLeave = (e: React.DragEvent) => {
+        e.preventDefault();
+        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+        if (dragDepthRef.current === 0) {
+            setIsDraggingFile(false);
+        }
+    };
+
+    const handleComposerDrop = async (e: React.DragEvent) => {
+        e.preventDefault();
+        dragDepthRef.current = 0;
+        setIsDraggingFile(false);
+        if (isEditing) return;
+        const file = e.dataTransfer.files?.[0];
+        if (file) {
+            await attachFile(file);
         }
     };
 
@@ -1348,7 +1379,7 @@ export function ChatInterface({
             </div>
 
             {/* Input Area */}
-            <div className="p-4 bg-background border-t border-border relative z-20">
+            <div className="chat-composer-shell border-t border-border bg-background p-4 relative z-20">
                 <div className="mx-auto max-w-[48rem] relative group font-sans">
                     <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px]">
                         <StatusChip
@@ -1370,25 +1401,40 @@ export function ChatInterface({
                         )}
                     </div>
 
-                    {/* Attachment Preview */}
-                    {selectedAttachment && (
-                        <div className="absolute bottom-full left-0 mb-4 bg-background border border-border p-2 rounded-xl shadow-lg animate-in fade-in slide-in-from-bottom-2">
-                            <div className="relative">
-                                <div className="max-w-[min(20rem,90vw)]">
-                                    <AttachmentPreview attachment={selectedAttachment} compact={selectedAttachment.kind !== 'image'} />
-                                </div>
-                                <button
-                                    onClick={clearSelectedAttachment}
-                                    aria-label="Remove attachment"
-                                    className="absolute -top-2 -right-2 bg-destructive text-white rounded-full p-1 shadow-sm hover:bg-destructive/90 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                                >
-                                    <X className="w-3 h-3" />
-                                </button>
+                    <div
+                        className={cn(
+                            "chat-composer relative rounded-2xl border bg-muted/40 shadow-sm transition-colors",
+                            isDraggingFile
+                                ? "border-primary bg-primary/5 ring-2 ring-primary/20"
+                                : "border-border/80 focus-within:border-primary/40 focus-within:ring-2 focus-within:ring-primary/15"
+                        )}
+                        onDragEnter={handleComposerDragEnter}
+                        onDragOver={handleComposerDragOver}
+                        onDragLeave={handleComposerDragLeave}
+                        onDrop={handleComposerDrop}
+                    >
+                        {isDraggingFile && (
+                            <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary/50 bg-background/80 text-sm font-medium text-primary">
+                                Drop an image to attach
                             </div>
-                        </div>
-                    )}
+                        )}
 
-                    <div className="relative flex items-end bg-muted/50 rounded-xl">
+                        {selectedAttachment && (
+                            <div className="flex items-start gap-3 border-b border-border/70 px-3 pt-3">
+                                <div className="relative max-w-[12rem]">
+                                    <AttachmentPreview attachment={selectedAttachment} compact />
+                                    <button
+                                        onClick={clearSelectedAttachment}
+                                        aria-label="Remove attachment"
+                                        className="absolute -right-2 -top-2 rounded-full bg-destructive p-1 text-white shadow-sm transition-colors hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                    >
+                                        <X className="h-3 w-3" />
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                    <div className="relative flex items-end">
                         <Button
                             variant="ghost"
                             size="icon"
@@ -1539,7 +1585,7 @@ export function ChatInterface({
                                                 ? "Update the selected message and resend it from this point..."
                                             : selectedSkill
                                                 ? `Message with ${selectedSkill.name} skill context...`
-                                                : "Ask LimeBot to inspect, plan, code, or explain..."
+                                                : "Message LimeBot, or paste / drop an image..."
                                 }
                                 value={inputValue}
                                 onChange={(e) => {
@@ -1583,6 +1629,7 @@ export function ChatInterface({
                                 <span className="sr-only">Send</span>
                             </Button>
                         </div>
+                    </div>
                     </div>
 
                     {(showSlashMenu || (skillsLoading && inputValue === '/')) && (

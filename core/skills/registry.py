@@ -267,7 +267,7 @@ class SkillRegistry:
         hints = {
             "browser": {"web", "website", "search", "browse", "page", "url"},
             "discord": {"discord", "guild", "channel", "server", "embed"},
-            "download_image": {"image", "photo", "wallpaper", "download"},
+            "download_image": {"wallpaper", "cdn", "honey-badger"},
             "filesystem": {"file", "folder", "directory", "path", "read", "write"},
             "create-plugin-scaffold": {"plugin", "manifest", "marketplace"},
             "jira": {"jira", "ticket", "issue", "attachment", "attachments"},
@@ -411,6 +411,12 @@ class SkillRegistry:
         text = (user_text or "").strip()
         sticky = [name for name in (sticky_skill_names or []) if name in active_skills]
         if not text:
+            return sticky[:max_skills]
+
+        from core.media_intent import is_chat_media_delivery, is_image_generation_request
+
+        if is_chat_media_delivery(text) and not is_image_generation_request(text):
+            # Native image_search + send_media handles chat photo delivery.
             return sticky[:max_skills]
 
         if self._looks_like_skill_inventory_request(text):

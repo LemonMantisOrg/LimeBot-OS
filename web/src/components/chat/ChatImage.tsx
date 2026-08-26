@@ -6,7 +6,15 @@ const MIN_SCALE = 1;
 const MAX_SCALE = 6;
 const SCALE_STEP = 0.25;
 
-export function ChatImage({ src, alt }: { src: string; alt: string }) {
+export function ChatImage({
+    src,
+    alt,
+    onError,
+}: {
+    src: string;
+    alt: string;
+    onError?: () => void;
+}) {
     const [error, setError] = useState(false);
     const [open, setOpen] = useState(false);
 
@@ -17,8 +25,11 @@ export function ChatImage({ src, alt }: { src: string; alt: string }) {
             <img
                 src={src}
                 alt={alt}
-                className="mb-2 max-h-[30rem] max-w-full cursor-zoom-in rounded-lg border border-border/60 bg-muted/30 object-contain shadow-sm transition-transform hover:scale-[1.01]"
-                onError={() => setError(true)}
+                className="chat-inline-image max-h-[28rem] w-full cursor-zoom-in rounded-xl bg-muted/30 object-contain"
+                onError={() => {
+                    setError(true);
+                    onError?.();
+                }}
                 onClick={() => setOpen(true)}
             />
             {open && (
