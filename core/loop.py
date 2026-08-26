@@ -322,8 +322,8 @@ _DENY_WORDS = DENY_WORDS
 _AGENT_READINESS_TIMEOUT_S = 20.0
 _LLM_WARMUP_MAX_TOKENS = 16
 
-# Search tools route through core/web_search.py (provider layer) rather than the
-# Playwright browser stack. google_search is kept as a back-compat alias.
+# Search tools drive Playwright (Google web/news, Bing/Google images).
+# google_search is kept as a back-compat alias.
 _SEARCH_TOOLS = frozenset(
     {"web_search", "image_search", "deep_research", "google_search"}
 )
@@ -4537,70 +4537,48 @@ class AgentLoop:
         session_key: str,
         on_progress=None,
     ):
-        """Run the provider chain (+ browser scrape fallback for web/news).
+        """Run search in the real Playwright browser.
 
         Returns a ``SearchResponse`` on success, or ``None`` with the last error
         string via the second tuple element.
         """
-        from core.web_search import build_provider_chain
+        from core.browser import BROWSER_INSTALL_HINT, PLAYWRIGHT_AVAILABLE
+        from core.web_search import search_response_from_browser
+
+        if not PLAYWRIGHT_AVAILABLE:
+            return None, BROWSER_INSTALL_HINT
 
         last_err = ""
-        for provider in build_provider_chain(self.config):
-            try:
-                if on_progress:
-                    await on_progress(
-                        f"🔍 Searching ({provider.name}) for: {query}"
-                    )
-                resp = await provider.search(query, count=count, kind=kind)
-                if resp.ok:
-                    return resp, ""
-                last_err = resp.error or "no results"
-            except Exception as e:  # provider crash → try the next one
-                last_err = str(e)
-                logger.warning(f"Search provider {provider.name} failed: {e}")
-
-        # Final fallback: scrape Google via the live browser (web/news only).
-        if kind in ("web", "news") and self._browser_skill_enabled():
-            try:
-                if on_progress:
-                    await on_progress("🔍 Falling back to browser Google search...")
-                browser = await get_browser_manager(
-                    session_key=session_key, config=self.config
+        try:
+            if on_progress:
+                label = "images" if kind == "images" else (
+                    "news" if kind == "news" else "the web"
                 )
-                raw = await browser.google_search(query, on_progress=on_progress)
-                raw_results = raw.get("results") if isinstance(raw, dict) else None
-                if (
-                    isinstance(raw, dict)
-                    and raw.get("success")
-                    and isinstance(raw_results, list)
-                    and raw_results
-                ):
-                    from core.web_search import SearchResponse, SearchResult
-
-                    scraped = SearchResponse(
-                        kind=kind, query=query, provider="google-scrape"
-                    )
-                    for item in raw_results[:count]:
-                        if not isinstance(item, dict):
-                            continue
-                        url = str(item.get("url") or "").strip()
-                        if not url:
-                            continue
-                        scraped.results.append(
-                            SearchResult(
-                                title=str(item.get("title") or url),
-                                url=url,
-                                snippet=str(item.get("snippet") or ""),
-                                source="google-scrape",
-                            )
-                        )
-                    if scraped.results:
-                        return scraped, ""
-                if isinstance(raw, dict):
-                    last_err = str(raw.get("error") or "no parseable Google results")
-            except Exception as e:
-                last_err = str(e)
-                logger.warning(f"Browser google_search fallback failed: {e}")
+                await on_progress(f"🔍 Searching {label} for: {query}")
+            browser = await get_browser_manager(
+                session_key=session_key, config=self.config
+            )
+            if kind == "images":
+                raw = await browser.image_search(
+                    query, on_progress=on_progress, count=count
+                )
+            else:
+                raw = await browser.google_search(
+                    query, on_progress=on_progress, count=count, kind=kind
+                )
+            resp = search_response_from_browser(
+                raw, query=query, kind=kind, count=count
+            )
+            if resp.ok:
+                return resp, ""
+            last_err = resp.error or "no results"
+            if BROWSER_INSTALL_HINT in last_err:
+                return None, BROWSER_INSTALL_HINT
+        except Exception as e:
+            last_err = str(e)
+            logger.warning(f"Browser search failed: {e}")
+            if BROWSER_INSTALL_HINT in last_err:
+                return None, BROWSER_INSTALL_HINT
 
         return None, last_err
 
@@ -4655,12 +4633,16 @@ class AgentLoop:
             query, count, kind, session_key, on_progress=on_progress
         )
         if response is None:
+            from core.browser import BROWSER_INSTALL_HINT, PLAYWRIGHT_AVAILABLE
+
+            if (not PLAYWRIGHT_AVAILABLE) or (
+                last_err and BROWSER_INSTALL_HINT in last_err
+            ):
+                return f"Error: {BROWSER_INSTALL_HINT}"
             return (
-                f"Error: web search failed ({last_err or 'no provider available'}). "
-                "Configure a search API key (TAVILY_API_KEY / BRAVE_SEARCH_API_KEY / "
-                "SERPAPI_API_KEY) or enable the browser skill. Do not repeat web_search "
-                "with rephrased queries in this turn; navigate to one known official URL "
-                "or continue with explicit caveats."
+                f"Error: web search failed ({last_err or 'no results'}). "
+                "Do not repeat web_search with rephrased queries in this turn; "
+                "navigate to one known official URL or continue with explicit caveats."
             )
         return format_search_response(response)
 

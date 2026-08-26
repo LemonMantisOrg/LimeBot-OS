@@ -425,21 +425,12 @@ class Toolbox:
             except Exception as e:
                 logger.warning(f"Failed to read subagent registry: {e}")
 
-        # Search tools are available when a search API key is configured
-        # (browser-skill enablement is handled inside build_tool_definitions).
-        search_available = False
-        try:
-            from core.web_search import search_api_configured
-
-            search_available = search_api_configured(self.config)
-        except Exception:
-            search_available = False
-
-        # Base tools from tool_defs.py
+        # Search tools always stay registered; missing Playwright fails at
+        # execution with BROWSER_INSTALL_HINT rather than hiding the tools.
         tools = build_tool_definitions(
             enabled_skills,
             available_agents=available_agents,
-            search_available=search_available,
+            search_available=True,
         )
 
         # Load MCP tools dynamically

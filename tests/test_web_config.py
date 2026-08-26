@@ -611,7 +611,7 @@ class TestWebConfig(unittest.TestCase):
         self.assertTrue(secrets["MOONSHOT_API_KEY"]["configured"])
         self.assertEqual(secrets["MOONSHOT_API_KEY"]["last4"], "cret")
 
-    def test_config_api_serializes_search_provider_secrets(self):
+    def test_config_api_omits_legacy_search_api_secrets(self):
         try:
             from fastapi.testclient import TestClient
         except Exception:
@@ -633,14 +633,10 @@ class TestWebConfig(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         secrets = payload["secrets"]
-        self.assertTrue(secrets["TAVILY_API_KEY"]["configured"])
-        self.assertEqual(secrets["TAVILY_API_KEY"]["last4"], "abcd")
-        # Legacy alias env vars still surface under the canonical key names.
-        self.assertTrue(secrets["BRAVE_SEARCH_API_KEY"]["configured"])
-        self.assertEqual(secrets["BRAVE_SEARCH_API_KEY"]["last4"], "wxyz")
-        self.assertTrue(secrets["SERPAPI_API_KEY"]["configured"])
-        self.assertEqual(secrets["SERPAPI_API_KEY"]["last4"], "1234")
-        self.assertEqual(payload["env"]["SEARCH_PROVIDER"], "brave")
+        self.assertNotIn("TAVILY_API_KEY", secrets)
+        self.assertNotIn("BRAVE_SEARCH_API_KEY", secrets)
+        self.assertNotIn("SERPAPI_API_KEY", secrets)
+        self.assertNotIn("SEARCH_PROVIDER", payload["env"])
 
     def test_config_api_serializes_elevenlabs_secret(self):
         try:

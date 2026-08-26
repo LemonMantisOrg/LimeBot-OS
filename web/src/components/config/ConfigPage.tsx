@@ -35,7 +35,6 @@ interface ConfigState {
     BROWSER_CDP_URL?: string;
     BROWSER_USER_DATA_DIR?: string;
     BROWSER_PROFILE_DIRECTORY?: string;
-    SEARCH_PROVIDER?: string;
     VIDEO_WHISPER_ENABLED?: string;
     [key: string]: ConfigValue;
 }
@@ -53,9 +52,6 @@ const SECRET_KEYS = [
     "MOONSHOT_API_KEY",
     "NVIDIA_API_KEY",
     "DASHSCOPE_API_KEY",
-    "TAVILY_API_KEY",
-    "BRAVE_SEARCH_API_KEY",
-    "SERPAPI_API_KEY",
     "ELEVENLABS_API_KEY",
 ] as const;
 
@@ -76,9 +72,6 @@ const AI_PROVIDER_SECRETS: Array<{ key: SecretKey; label: string; placeholder: s
 ];
 
 const CAPABILITY_SECRETS: SecretKey[] = [
-    "TAVILY_API_KEY",
-    "BRAVE_SEARCH_API_KEY",
-    "SERPAPI_API_KEY",
     "ELEVENLABS_API_KEY",
 ];
 
@@ -722,38 +715,19 @@ export function ConfigPage() {
                                     Web Intelligence
                                 </CardTitle>
                                 <CardDescription>
-                                    Search, news, images, and deep research. Keyless fallback remains available when no provider is connected.
+                                    Search, news, images, and deep research run through the real Playwright browser — the same stack as the browser skill.
                                 </CardDescription>
                             </CardHeader>
-                            <CardContent className="space-y-6">
-                                <div className="grid gap-2">
-                                    <Label htmlFor="search_provider">Search Provider</Label>
-                                    <Select
-                                        value={config.SEARCH_PROVIDER || "auto"}
-                                        onValueChange={(value) => setConfig({ ...config, SEARCH_PROVIDER: value })}
-                                    >
-                                        <SelectTrigger id="search_provider">
-                                            <SelectValue placeholder="auto" />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            <SelectItem value="auto">Auto (best available, recommended)</SelectItem>
-                                            <SelectItem value="tavily">Tavily</SelectItem>
-                                            <SelectItem value="brave">Brave Search</SelectItem>
-                                            <SelectItem value="serpapi">SerpAPI</SelectItem>
-                                            <SelectItem value="duckduckgo">DuckDuckGo (keyless)</SelectItem>
-                                            <SelectItem value="scrape">Browser scrape only</SelectItem>
-                                        </SelectContent>
-                                    </Select>
-                                    <p className="text-[10px] text-muted-foreground">
-                                        "Auto" uses any configured key by priority (Tavily → Brave → SerpAPI), then falls back to DuckDuckGo.
-                                    </p>
-                                </div>
-
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                    {renderSecretInput("TAVILY_API_KEY", "Tavily", "tvly-...", "Best fit for deep research and extracted page content")}
-                                    {renderSecretInput("BRAVE_SEARCH_API_KEY", "Brave Search", "BSA...", "Web, news, and image search")}
-                                    {renderSecretInput("SERPAPI_API_KEY", "SerpAPI", "...", "Google-backed web, news, and image results")}
-                                </div>
+                            <CardContent className="space-y-3">
+                                <p className="text-sm text-muted-foreground">
+                                    Install the browser once from the LimeBot folder. After that, web_search and image_search work without a separate search API key.
+                                </p>
+                                <p className="text-[11px] font-mono text-muted-foreground break-all">
+                                    npm run lime-bot setup -- --recommended
+                                </p>
+                                <p className="text-[11px] text-muted-foreground">
+                                    Or: <span className="font-mono">npm run lime-bot feature install browser && npm run install-browser</span>
+                                </p>
                             </CardContent>
                         </Card>
 

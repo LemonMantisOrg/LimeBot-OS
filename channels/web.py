@@ -67,9 +67,6 @@ _SECRET_CONFIG_KEYS = frozenset(
         "MOONSHOT_API_KEY",
         "NVIDIA_API_KEY",
         "DASHSCOPE_API_KEY",
-        "TAVILY_API_KEY",
-        "BRAVE_SEARCH_API_KEY",
-        "SERPAPI_API_KEY",
         "ELEVENLABS_API_KEY",
         "DISCORD_TOKEN",
         "TELEGRAM_BOT_TOKEN",
@@ -1731,9 +1728,6 @@ class WebChannel(BaseChannel):
                 "BROWSER_PROFILE_DIRECTORY": getattr(
                     cfg.browser, "profile_directory", ""
                 ),
-                "SEARCH_PROVIDER": getattr(
-                    getattr(cfg, "search", None), "provider", "auto"
-                ),
             }
             secret_dict = {
                 "APP_API_KEY": _serialize_secret(cfg.whitelist.api_key or ""),
@@ -1750,13 +1744,6 @@ class WebChannel(BaseChannel):
                 ),
                 "NVIDIA_API_KEY": _serialize_secret(os.getenv("NVIDIA_API_KEY", "")),
                 "DASHSCOPE_API_KEY": _serialize_secret(os.getenv("DASHSCOPE_API_KEY", "")),
-                "TAVILY_API_KEY": _serialize_secret(os.getenv("TAVILY_API_KEY", "")),
-                "BRAVE_SEARCH_API_KEY": _serialize_secret(
-                    os.getenv("BRAVE_SEARCH_API_KEY", "") or os.getenv("BRAVE_API_KEY", "")
-                ),
-                "SERPAPI_API_KEY": _serialize_secret(
-                    os.getenv("SERPAPI_API_KEY", "") or os.getenv("SERPAPI_KEY", "")
-                ),
                 "ELEVENLABS_API_KEY": _serialize_secret(
                     os.getenv("ELEVENLABS_API_KEY", "")
                 ),

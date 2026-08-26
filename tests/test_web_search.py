@@ -4,57 +4,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 
-def _cfg(**kw):
-    search = SimpleNamespace(
-        provider=kw.get("provider", "auto"),
-        tavily_api_key=kw.get("tavily", ""),
-        brave_api_key=kw.get("brave", ""),
-        serpapi_api_key=kw.get("serpapi", ""),
-    )
-    return SimpleNamespace(search=search)
-
-
-class TestProviderChain(unittest.TestCase):
-    def test_auto_orders_configured_apis_then_ddg(self):
-        from core.web_search import (
-            build_provider_chain,
-            TavilyProvider,
-            BraveProvider,
-            DuckDuckGoProvider,
-        )
-
-        chain = build_provider_chain(_cfg(tavily="k1", brave="k2"))
-        self.assertIsInstance(chain[0], TavilyProvider)
-        self.assertIsInstance(chain[1], BraveProvider)
-        self.assertIsInstance(chain[-1], DuckDuckGoProvider)
-
-    def test_no_keys_gives_ddg_only(self):
-        from core.web_search import build_provider_chain, DuckDuckGoProvider
-
-        chain = build_provider_chain(_cfg())
-        self.assertEqual(len(chain), 1)
-        self.assertIsInstance(chain[0], DuckDuckGoProvider)
-
-    def test_explicit_provider_is_respected(self):
-        from core.web_search import build_provider_chain, BraveProvider
-
-        chain = build_provider_chain(_cfg(provider="brave", brave="k", tavily="t"))
-        # Only Brave (then the keyless DDG safety net), not Tavily.
-        self.assertIsInstance(chain[0], BraveProvider)
-        self.assertTrue(all(p.name != "tavily" for p in chain))
-
-    def test_scrape_provider_yields_empty_chain(self):
-        from core.web_search import build_provider_chain
-
-        self.assertEqual(build_provider_chain(_cfg(provider="scrape")), [])
-
-    def test_search_api_configured(self):
-        from core.web_search import search_api_configured
-
-        self.assertFalse(search_api_configured(_cfg()))
-        self.assertTrue(search_api_configured(_cfg(serpapi="k")))
-
-
 class TestFormatting(unittest.TestCase):
     def test_web_results_formatted_with_urls(self):
         from core.web_search import (
@@ -63,13 +12,13 @@ class TestFormatting(unittest.TestCase):
             format_search_response,
         )
 
-        resp = SearchResponse(kind="web", query="cats", provider="tavily")
+        resp = SearchResponse(kind="web", query="cats", provider="browser")
         resp.answer = "Cats are mammals."
         resp.results = [SearchResult(title="Cats", url="https://ex.test/cats", snippet="Feline")]
         out = format_search_response(resp)
         self.assertIn("https://ex.test/cats", out)
         self.assertIn("Direct answer", out)
-        self.assertIn("(via tavily)", out)
+        self.assertIn("(via browser)", out)
 
     def test_image_results_include_send_media_hint(self):
         from core.web_search import (
@@ -78,29 +27,81 @@ class TestFormatting(unittest.TestCase):
             format_search_response,
         )
 
-        resp = SearchResponse(kind="images", query="pup", provider="brave")
+        resp = SearchResponse(kind="images", query="pup", provider="browser")
         resp.images = [
             ImageResult(title="Puppy", image_url="https://img.test/a.jpg", source_page="https://p.test")
         ]
         out = format_search_response(resp)
         self.assertIn("https://img.test/a.jpg", out)
+        self.assertIn("Image URL:", out)
         self.assertIn("send_media", out)
 
 
-class TestDuckDuckGoUnwrap(unittest.TestCase):
-    def test_unwrap_uddg_redirect(self):
-        from core.web_search import DuckDuckGoProvider
-
-        href = "//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpage&rut=abc"
-        self.assertEqual(DuckDuckGoProvider._unwrap(href), "https://example.com/page")
-
-    def test_unwrap_direct_url(self):
-        from core.web_search import DuckDuckGoProvider
+class TestImageUrlFilter(unittest.TestCase):
+    def test_keeps_public_originals(self):
+        from core.web_search import usable_image_url
 
         self.assertEqual(
-            DuckDuckGoProvider._unwrap("https://example.com/x"),
-            "https://example.com/x",
+            usable_image_url("https://cdn.example.test/rose.jpg"),
+            "https://cdn.example.test/rose.jpg",
         )
+
+    def test_drops_thumbnails_and_data_urls(self):
+        from core.web_search import usable_image_url
+
+        self.assertEqual(
+            usable_image_url("https://encrypted-tbn0.gstatic.com/images?q=tbn:abc"),
+            "",
+        )
+        self.assertEqual(usable_image_url("data:image/png;base64,aaaa"), "")
+        self.assertEqual(usable_image_url("/relative.jpg"), "")
+
+    def test_mapper_keeps_image_urls_for_send_media(self):
+        from core.web_search import search_response_from_browser
+
+        resp = search_response_from_browser(
+            {
+                "success": True,
+                "images": [
+                    {
+                        "title": "Rosé",
+                        "image_url": "https://img.test/rose.jpg",
+                        "source_page": "https://wiki.test/rose",
+                        "width": 800,
+                        "height": 600,
+                    },
+                    {"title": "thumb", "image_url": "https://encrypted-tbn0.gstatic.com/x"},
+                ],
+            },
+            query="rose blackpink",
+            kind="images",
+            count=8,
+        )
+        self.assertTrue(resp.ok)
+        self.assertEqual(resp.provider, "browser")
+        self.assertEqual(len(resp.images), 1)
+        self.assertEqual(resp.images[0].image_url, "https://img.test/rose.jpg")
+
+
+class TestNoHttpSearchProviders(unittest.TestCase):
+    def test_runtime_modules_do_not_call_legacy_search_apis(self):
+        forbidden = (
+            "duckduckgo.com/i.js",
+            "html.duckduckgo.com",
+            "api.tavily.com",
+            "api.search.brave.com",
+            "serpapi.com/search",
+        )
+        roots = [
+            Path("core/web_search.py"),
+            Path("core/loop.py"),
+            Path("core/browser.py"),
+            Path("core/tools.py"),
+        ]
+        for path in roots:
+            text = path.read_text(encoding="utf-8")
+            for needle in forbidden:
+                self.assertNotIn(needle, text, f"{path} still mentions {needle}")
 
 
 class TestSSRFGuard(unittest.TestCase):
@@ -232,12 +233,16 @@ class TestSendMediaRemote(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent, [])
 
 
-class TestGoogleScrapeFallback(unittest.IsolatedAsyncioTestCase):
-    async def test_structured_scrape_results_become_normalized_sources(self):
+class TestBrowserSearch(unittest.IsolatedAsyncioTestCase):
+    def _loop(self):
         from core.loop import AgentLoop
 
         loop = AgentLoop.__new__(AgentLoop)
         loop.config = SimpleNamespace(skills=SimpleNamespace(enabled=["browser"]))
+        return loop
+
+    async def test_web_search_uses_mocked_google_search(self):
+        loop = self._loop()
         browser = SimpleNamespace(
             google_search=AsyncMock(
                 return_value={
@@ -249,27 +254,63 @@ class TestGoogleScrapeFallback(unittest.IsolatedAsyncioTestCase):
                             "snippet": "Current price",
                         }
                     ],
-                    "results_summary": "legacy summary",
                 }
-            )
+            ),
+            image_search=AsyncMock(return_value={"success": False, "images": []}),
         )
 
-        with patch("core.loop.get_browser_manager", AsyncMock(return_value=browser)), patch(
-            "core.web_search.build_provider_chain", return_value=[]
+        with patch("core.browser.PLAYWRIGHT_AVAILABLE", True), patch(
+            "core.loop.get_browser_manager", AsyncMock(return_value=browser)
         ):
             response, error = await loop._gather_search(
                 "official pricing", 5, "web", "web_test"
             )
 
         self.assertEqual(error, "")
-        self.assertEqual(response.provider, "google-scrape")
+        self.assertEqual(response.provider, "browser")
         self.assertEqual(response.results[0].url, "https://example.test/pricing")
+        browser.google_search.assert_awaited()
+        browser.image_search.assert_not_called()
 
-    async def test_unparseable_scrape_is_a_failure_not_a_pseudo_result(self):
-        from core.loop import AgentLoop
+    async def test_image_search_returns_image_urls(self):
+        loop = self._loop()
+        browser = SimpleNamespace(
+            google_search=AsyncMock(),
+            image_search=AsyncMock(
+                return_value={
+                    "success": True,
+                    "images": [
+                        {
+                            "title": "Rosé BLACKPINK",
+                            "image_url": "https://img.test/rose.jpg",
+                            "source_page": "https://wiki.test/rose",
+                        }
+                    ],
+                }
+            ),
+        )
 
-        loop = AgentLoop.__new__(AgentLoop)
-        loop.config = SimpleNamespace(skills=SimpleNamespace(enabled=["browser"]))
+        with patch("core.browser.PLAYWRIGHT_AVAILABLE", True), patch(
+            "core.loop.get_browser_manager", AsyncMock(return_value=browser)
+        ):
+            response, error = await loop._gather_search(
+                "rose of blackpink", 8, "images", "web_test"
+            )
+
+        self.assertEqual(error, "")
+        self.assertEqual(response.kind, "images")
+        self.assertEqual(response.images[0].image_url, "https://img.test/rose.jpg")
+        browser.image_search.assert_awaited()
+        browser.google_search.assert_not_called()
+
+        from core.web_search import format_search_response
+
+        formatted = format_search_response(response)
+        self.assertIn("Image URL: https://img.test/rose.jpg", formatted)
+        self.assertIn("send_media", formatted)
+
+    async def test_unparseable_search_is_a_failure(self):
+        loop = self._loop()
         browser = SimpleNamespace(
             google_search=AsyncMock(
                 return_value={
@@ -280,8 +321,8 @@ class TestGoogleScrapeFallback(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        with patch("core.loop.get_browser_manager", AsyncMock(return_value=browser)), patch(
-            "core.web_search.build_provider_chain", return_value=[]
+        with patch("core.browser.PLAYWRIGHT_AVAILABLE", True), patch(
+            "core.loop.get_browser_manager", AsyncMock(return_value=browser)
         ):
             response, error = await loop._gather_search(
                 "official pricing", 5, "web", "web_test"
@@ -289,6 +330,36 @@ class TestGoogleScrapeFallback(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(response)
         self.assertIn("could not be parsed", error)
+
+    async def test_missing_playwright_uses_browser_install_hint(self):
+        from core.browser import BROWSER_INSTALL_HINT
+
+        loop = self._loop()
+        with patch("core.browser.PLAYWRIGHT_AVAILABLE", False):
+            response, error = await loop._gather_search(
+                "cats", 5, "web", "web_test"
+            )
+
+        self.assertIsNone(response)
+        self.assertEqual(error, BROWSER_INSTALL_HINT)
+        self.assertNotIn("TAVILY", error)
+        self.assertNotIn("BRAVE_SEARCH", error)
+        self.assertNotIn("SERPAPI", error)
+
+    async def test_execute_search_tool_missing_playwright_mentions_install(self):
+        from core.browser import BROWSER_INSTALL_HINT
+
+        loop = self._loop()
+        loop.toolbox = SimpleNamespace(send_progress=AsyncMock())
+        with patch("core.browser.PLAYWRIGHT_AVAILABLE", False):
+            out = await loop._execute_search_tool(
+                "image_search", {"query": "rose of blackpink"}, "web_test"
+            )
+
+        self.assertTrue(out.startswith("Error:"))
+        self.assertIn(BROWSER_INSTALL_HINT, out)
+        self.assertNotIn("TAVILY_API_KEY", out)
+        self.assertNotIn("configure", out.lower())
 
 
 class TestDeepResearch(unittest.IsolatedAsyncioTestCase):
@@ -304,7 +375,7 @@ class TestDeepResearch(unittest.IsolatedAsyncioTestCase):
 
         loop = AgentLoop.__new__(AgentLoop)
 
-        resp = SearchResponse(kind="web", query="q", provider="tavily")
+        resp = SearchResponse(kind="web", query="q", provider="browser")
         resp.results = [
             SearchResult(title="A", url="https://a.test", snippet="s", content="Cats. " * 100),
             SearchResult(title="B", url="https://b.test", snippet="s2", content="Dogs. " * 100),

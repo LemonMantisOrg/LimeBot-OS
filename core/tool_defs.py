@@ -884,13 +884,12 @@ BROWSER_TOOLS = [
 ]
 
 
-# Search tools are available when a search API key is configured OR the browser
-# skill is enabled (a keyless DuckDuckGo fallback needs no browser). They route
-# through core/web_search.py, not the Playwright browser stack.
+# Search tools always stay registered. They drive Playwright (the same stack as
+# the browser skill). Missing Playwright fails at execution with the install hint.
 SEARCH_TOOLS = [
     {
         "name": "web_search",
-        "description": "Search the live web for pages, facts, or current information. Returns ranked results with titles, URLs, and snippets (plus a direct answer when the provider supplies one). Use kind='news' for recent news. A common first step before browser_navigate or deep_research. Example: web_search(query='best pizza in Rome', count=8).",
+        "description": "Search the live web for pages, facts, or current information using the real browser. Returns ranked results with titles, URLs, and snippets. Use kind='news' for recent news. A common first step before browser_navigate or deep_research. Example: web_search(query='best pizza in Rome', count=8).",
         "params": {
             "query": {"type": "string", "description": "Search query string."},
             "count": {
@@ -1539,9 +1538,8 @@ def build_tool_definitions(
     Args:
         enabled_skills: List of enabled skill names from config.
         available_agents: Named subagent profiles for spawn_agent.
-        search_available: True when a search API key is configured. Search tools
-            are always registered because keyless DuckDuckGo is available even
-            without a paid key or the browser skill.
+        search_available: Unused; search tools are always registered. Missing
+            Playwright fails at execution with the browser install hint.
 
     Returns:
         List of OpenAI-compatible tool definition dicts.
@@ -1559,7 +1557,6 @@ def build_tool_definitions(
 
     browser_enabled = "browser" in enabled_skills
 
-    # search_available is retained for callers; DuckDuckGo needs no key.
     _ = search_available
     tools.extend(_inflate_tool(t) for t in SEARCH_TOOLS)
 

@@ -151,21 +151,6 @@ def load_config(force_reload=False):
         "VIDEO_WHISPER_ENABLED", default=False
     )
 
-    # Hybrid web search: use a keyed provider when configured, otherwise fall
-    # back to the keyless DuckDuckGo/browser chain. Keys are used in-process
-    # only; _sanitized_env() strips them from spawned subprocesses.
-    config.search = SimpleNamespace()
-    config.search.provider = (
-        os.getenv("SEARCH_PROVIDER", "auto").strip().lower() or "auto"
-    )
-    config.search.tavily_api_key = os.getenv("TAVILY_API_KEY", "").strip()
-    config.search.brave_api_key = (
-        os.getenv("BRAVE_SEARCH_API_KEY") or os.getenv("BRAVE_API_KEY") or ""
-    ).strip()
-    config.search.serpapi_api_key = (
-        os.getenv("SERPAPI_API_KEY") or os.getenv("SERPAPI_KEY") or ""
-    ).strip()
-
     legacy_autonomous_mode = _load_bool_env("AUTONOMOUS_MODE", default=False)
     raw_approval_profile = str(os.getenv("APPROVAL_POLICY_PROFILE") or "").strip().lower()
     if raw_approval_profile and raw_approval_profile not in _APPROVAL_POLICY_PROFILES:
