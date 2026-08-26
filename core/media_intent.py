@@ -1,13 +1,14 @@
 """Intent helpers for chat media delivery vs image generation.
 
 A request like "download a picture of X and send it in this chat" must route
-to image_search + send_media. generate_image is only for newly created art.
+to host-owned ``web_search(kind="images")``. The host attaches the photo.
+``generate_image`` is only for newly created art.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Tuple
+from typing import FrozenSet, Optional, Tuple
 
 _DELIVERY_VERBS = (
     r"send|share|download|get|find|fetch|attach|look\s*up|look\s*for|"
@@ -33,29 +34,39 @@ _CREATE_RE = re.compile(
     rf"\b(?:{_CREATE_VERBS})\b.{{0,60}}\b(?:{_IMAGE_NOUNS}|art|illustration)\b",
     re.IGNORECASE | re.DOTALL,
 )
-CHAT_MEDIA_TOOLS: Tuple[str, ...] = ("image_search", "send_media")
-CHAT_MEDIA_SUPPORTING_TOOLS: Tuple[str, ...] = ("web_search",)
+
+# Model-facing tools for a photo-send turn. Host attaches the bytes.
+CHAT_MEDIA_TOOLS: Tuple[str, ...] = ("web_search",)
+CHAT_MEDIA_SUPPORTING_TOOLS: Tuple[str, ...] = ()
 CHAT_MEDIA_BLOCKED_TOOLS: Tuple[str, ...] = (
     "generate_image",
     "spawn_agent",
     "capability_search",
     "run_command",
+    "send_media",
+    "google_search",
+    "image_search",
+    "deep_research",
+    "browser_click",
+    "browser_navigate",
+    "browser_act",
+    "browser_extract",
+    "browser_snapshot",
+    "browser_type",
+    "browser_download",
 )
 
 MEDIA_DELIVERY_RULES = (
-    "MEDIA DELIVERY (highest priority when they want a photo/file in this chat):\n"
+    "MEDIA DELIVERY (highest priority when they want a photo in this chat):\n"
     "If the user asks to send, download, find, fetch, show, or share a picture/"
-    "photo/file into THIS chat, call `image_search` (or `web_search` for a "
-    "direct Wikimedia/image URL), then call `send_media(path=<Image URL>)` with "
-    "a real http(s) image URL. Keep public-figure names in the search query. "
-    "Add a short caption. Then STOP.\n"
+    "photo into THIS chat, call `web_search(query=..., kind=\"images\")` once. "
+    "Keep public-figure names in the query. Then STOP. The host downloads the "
+    "best image and attaches it to the chat. Do not call `send_media`, "
+    "`generate_image`, `spawn_agent`, `run_command`, or any browser tool. "
+    "Do not open a search engine yourself.\n"
     "Do NOT call `generate_image` unless they asked to create, draw, render, or "
     "transform a NEW picture. Finding or downloading an existing photo is not "
     "image generation.\n"
-    "Do NOT call `spawn_agent`, `capability_search`, or `run_command`/curl for "
-    "this. `send_media` already downloads the bytes (SSRF-guarded public HTTP) "
-    "and attaches them to the outgoing chat message. No confirmation is required "
-    "for `image_search` or `send_media`.\n"
     "The identity/avatar URL rule applies ONLY when the user is setting the "
     "bot's profile picture — not when they want a photo delivered into the chat.\n"
 )
@@ -80,3 +91,24 @@ def is_chat_media_delivery(text: str) -> bool:
         # delivers. Fetch-and-send stays for download/find phrasing.
         return False
     return True
+
+
+def exclusive_tools_for_turn(
+    text: str, channel: str = ""
+) -> Optional[FrozenSet[str]]:
+    """Return an exclusive model-facing tool set for photo/generate turns."""
+    blob = str(text or "").strip()
+    if not blob:
+        return None
+    generation = is_image_generation_request(blob)
+    delivery = is_chat_media_delivery(blob)
+    if generation and not delivery:
+        return frozenset({"generate_image"})
+    if delivery and not generation:
+        names = {"web_search"}
+        # Discord/WhatsApp still expose send_media for non-web file share.
+        # Web photo delivery is host-attached and must not register send_media.
+        if str(channel or "").strip().lower() in {"discord", "whatsapp"}:
+            names.add("send_media")
+        return frozenset(names)
+    return None

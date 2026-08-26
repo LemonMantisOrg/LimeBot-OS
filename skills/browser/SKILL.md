@@ -1,6 +1,6 @@
 ---
 name: browser
-description: Control a real, local web browser to search, navigate, and extract information.
+description: Control a real, local web browser to navigate pages and extract information. Search is a separate host-owned web_search tool.
 dependencies:
   python: []
   node: []
@@ -10,29 +10,24 @@ dependencies:
 # Web Browser 🌐
 LimeBot's window to the live internet. It uses a local instance of Chrome/Chromium to interact with websites just like a human.
 
+Search is **host-owned**. Call `web_search` — do not open Google or another search engine with browser tools.
+
 ### Core Commands:
-- `web_search(query, count, kind)`: Preferred web search. `kind='news'` for recent news. Returns ranked titles/URLs/snippets.
-- `image_search(query)`: Find images. Returns Image URLs + source pages.
-- `deep_research(query)`: Multi-source research with a cited synthesized answer. Use for questions needing several sources.
-- `browser_navigate(url)`: Open a page. Returns the page title and a list of interactive elements with IDs (e.g., `[e12]`).
-- `browser_click(element_id)`: Interact with buttons or links using the IDs from the navigation result.
-- `browser_download(element_id=..., dest=..., timeout_ms=...)`: Click a Download/Export control and save the file under `temp/`. For a direct file URL use `url=` instead of `element_id`. Raise `timeout_ms` for large ISOs.
-- `browser_type(element_id, text)`: Fill out forms and search bars.
-- `browser_scroll(direction='down')`: Move through a page to reveal more content.
-- `browser_extract(selector='body')`: Get the text content of a page.
-- `google_search(query)`: Legacy alias for `web_search`.
+- `web_search(query, count, kind)`: Host-owned search. `kind='web'|'news'|'images'`. For a send-photo request use `kind='images'`; the host attaches the image.
+- `browser_navigate(url)`: Open a page you already have a URL for. Returns the page title and interactive elements with IDs (e.g., `[e12]`).
+- `browser_act(action, ...)`: `snapshot`, `click`, `type`, `scroll`, `wait`, `press`, `back`, `tabs`, `switch_tab`, or `download`.
+- `browser_extract(mode, selector)`: `mode='text'` (default) or `mode='media'`.
 
 If a browser tool says Playwright is missing, tell the user to run
 `npm run lime-bot setup -- --recommended` once. Do not invent a successful browse.
 
 ### Strategy:
-1. **Search** (`web_search` / `image_search` / `deep_research`) or **Navigate**.
-2. **Snapshot** to see the elements.
-3. **Click** or **Type** to interact.
+1. **Search** with `web_search` (never by navigating to a search engine).
+2. **Navigate** only when you already have a URL.
+3. **Act** (`snapshot` then click/type/download) to interact.
 4. **Extract** the final information needed.
 
 ### Sending a picture to the user:
-When the user asks you to send/show a picture of something, call `image_search(query=...)`,
-pick the best result, then call `send_media(path='<Image URL>')`. `send_media` downloads the
-remote URL and delivers it as a real image in web, Discord, and WhatsApp — do **not** just paste
-the raw URL as text.
+When the user asks you to send/show a picture of something, call
+`web_search(query=..., kind='images')` once and stop. The host downloads the best
+image and attaches it. Do not call `send_media` or `generate_image` for that request.

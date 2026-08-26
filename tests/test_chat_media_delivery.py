@@ -59,10 +59,11 @@ class TestChatMediaPromptAndTools(unittest.TestCase):
         )
 
         self.assertIn(MEDIA_DELIVERY_RULES.strip().split("\n")[0], prompt)
-        self.assertIn("image_search", prompt)
-        self.assertIn("send_media", prompt)
+        self.assertIn("web_search", prompt)
+        self.assertIn('kind="images"', prompt)
+        self.assertIn("Do not call `send_media`", prompt)
         self.assertLess(prompt.find("MEDIA DELIVERY"), prompt.find("IMAGE GENERATION"))
-        self.assertIn("identity-only rule does NOT apply", prompt)
+        self.assertIn("profile picture", prompt)
         self.assertIn("Do not read or dump AGENTS.md", prompt)
         self.assertNotIn("Core Module Reference", prompt)
         self.assertNotIn("DurableJobQueue", prompt)
@@ -74,25 +75,29 @@ class TestChatMediaPromptAndTools(unittest.TestCase):
         tools = build_tool_definitions(enabled_skills=[])
         by_name = {tool["function"]["name"]: tool["function"]["description"] for tool in tools}
 
-        self.assertIn("image_search", by_name)
-        self.assertIn("send_media", by_name)
-        self.assertIn("send_media", by_name["image_search"])
-        self.assertIn("image_search", by_name["send_media"])
+        self.assertIn("web_search", by_name)
+        self.assertNotIn("image_search", by_name)
+        self.assertNotIn("google_search", by_name)
+        self.assertNotIn("capability_search", by_name)
+        self.assertNotIn("deep_research", by_name)
+        self.assertIn("images", by_name["web_search"])
         self.assertIn("Do NOT use this to download", by_name["generate_image"])
         self.assertIn("photo into the current chat", by_name["spawn_agent"])
 
-    def test_shortlist_maps_send_picture_to_search_and_send_not_generate(self):
+    def test_shortlist_maps_send_picture_to_web_search_not_generate(self):
         from core.tool_defs import build_tool_definitions, shortlist_tool_definitions
 
-        tools = build_tool_definitions(enabled_skills=[])
-        selected = shortlist_tool_definitions(tools, ROSE_REQUEST)
+        tools = build_tool_definitions(enabled_skills=["browser"])
+        selected = shortlist_tool_definitions(tools, ROSE_REQUEST, channel="web")
         names = {tool["function"]["name"] for tool in selected}
 
-        self.assertIn("image_search", names)
-        self.assertIn("send_media", names)
+        self.assertEqual(names, {"web_search"})
+        self.assertNotIn("send_media", names)
+        self.assertNotIn("google_search", names)
+        self.assertNotIn("capability_search", names)
+        self.assertNotIn("browser_click", names)
         self.assertNotIn("generate_image", names)
         self.assertNotIn("spawn_agent", names)
-        self.assertNotIn("capability_search", names)
         self.assertNotIn("run_command", names)
 
     def test_search_tools_are_registered_without_browser_or_keys(self):
@@ -102,8 +107,14 @@ class TestChatMediaPromptAndTools(unittest.TestCase):
             tool["function"]["name"]
             for tool in build_tool_definitions(enabled_skills=[], search_available=False)
         }
-        self.assertIn("image_search", names)
+        self.assertNotIn("image_search", names)
         self.assertIn("web_search", names)
+        kinds = next(
+            tool["function"]["parameters"]["properties"]["kind"]["enum"]
+            for tool in build_tool_definitions(enabled_skills=[])
+            if tool["function"]["name"] == "web_search"
+        )
+        self.assertEqual(kinds, ["web", "news", "images"])
 
 
 class TestChatMediaPromptBloat(unittest.IsolatedAsyncioTestCase):
@@ -205,6 +216,128 @@ class TestSendMediaWebEnvelope(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(meta["attachments"][0]["kind"], "image")
         self.assertTrue(meta["attachments"][0]["url"].startswith("/temp/"))
         self.assertEqual(sent[0].content, "Rosé")
+
+
+class TestHostOwnedPhotoAttach(unittest.IsolatedAsyncioTestCase):
+    async def test_host_attach_stamps_turn_ids_and_image_envelope(self):
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        from core.bus import MessageBus
+        from core.context import tool_context
+        from core.loop import AgentLoop
+        from core.tools import Toolbox
+        from core.web_search import ImageResult, SearchResponse
+
+        sent = []
+        bus = MessageBus()
+
+        async def _capture(msg):
+            sent.append(msg)
+
+        bus.publish_outbound = _capture
+        toolbox = Toolbox(
+            allowed_paths=[str(Path.cwd())],
+            bus=bus,
+            config=SimpleNamespace(skills=SimpleNamespace(enabled=[])),
+        )
+        loop = AgentLoop.__new__(AgentLoop)
+        loop.toolbox = toolbox
+
+        tmp_dir = Path("temp")
+        tmp_dir.mkdir(exist_ok=True)
+        tmp_file = tmp_dir / "host_rose.png"
+        tmp_file.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+
+        async def fake_fetch(url, max_bytes=None):
+            self.assertEqual(url, "https://cdn.example.test/rose.jpg")
+            return str(tmp_file)
+
+        toolbox.fetch_url_to_temp = fake_fetch
+        response = SearchResponse(kind="images", query="rose blackpink", provider="host")
+        response.images = [
+            ImageResult(
+                title="Rosé",
+                image_url="https://cdn.example.test/rose.jpg",
+                source_page="https://wiki.test/rose",
+            )
+        ]
+        token = tool_context.set(
+            {
+                "channel": "web",
+                "chat_id": "dash",
+                "sender_id": "u1",
+                "turn_id": "turn_host",
+                "message_id": "msg_host",
+                "user_text": ROSE_REQUEST,
+            }
+        )
+        try:
+            await loop._maybe_host_attach_search_image(response, "rose blackpink")
+        finally:
+            tool_context.reset(token)
+            tmp_file.unlink(missing_ok=True)
+
+        self.assertTrue(response.attached)
+        self.assertEqual(len(sent), 1)
+        meta = sent[0].metadata
+        self.assertEqual(meta["turn_id"], "turn_host")
+        self.assertEqual(meta["message_id"], "msg_host")
+        self.assertEqual(meta["image"], meta["attachments"][0]["url"])
+        self.assertEqual(meta["attachments"][0]["kind"], "image")
+        self.assertTrue(meta["attachments"][0]["url"].startswith("/temp/"))
+
+    def test_generate_image_turn_is_exclusive(self):
+        from core.tool_defs import build_tool_definitions, shortlist_tool_definitions
+
+        tools = build_tool_definitions(enabled_skills=["browser"])
+        selected = shortlist_tool_definitions(
+            tools, "generate an image of a lime robot", channel="web"
+        )
+        names = {tool["function"]["name"] for tool in selected}
+        self.assertEqual(names, {"generate_image"})
+
+    def test_discord_photo_send_keeps_send_media(self):
+        from core.tool_defs import build_tool_definitions, shortlist_tool_definitions
+
+        tools = build_tool_definitions(enabled_skills=["browser"])
+        selected = shortlist_tool_definitions(tools, ROSE_REQUEST, channel="discord")
+        names = {tool["function"]["name"] for tool in selected}
+        self.assertEqual(names, {"web_search", "send_media"})
+
+    def test_browser_surface_is_three_tools(self):
+        from core.tool_defs import build_tool_definitions
+
+        names = {
+            tool["function"]["name"]
+            for tool in build_tool_definitions(enabled_skills=["browser"])
+        }
+        browser_names = {name for name in names if name.startswith("browser_")}
+        self.assertEqual(
+            browser_names,
+            {"browser_navigate", "browser_act", "browser_extract"},
+        )
+
+    def test_exclusive_shortlist_applies_even_when_global_shortlist_is_off(self):
+        from core.loop import AgentLoop
+        from core.tool_defs import build_tool_definitions
+
+        all_tools = build_tool_definitions(enabled_skills=["browser"])
+        agent = object.__new__(AgentLoop)
+        agent.config = SimpleNamespace(tool_shortlist_enabled=False)
+        agent.skill_registry = SimpleNamespace(get_required_tool_names=lambda _name: [])
+        agent._get_tool_definitions = lambda: all_tools
+        agent._log_tool_debug = lambda *args, **kwargs: None
+
+        selected = agent._get_tool_definitions_for_turn(
+            ROSE_REQUEST, session_key="web:dash"
+        )
+        names = {tool["function"]["name"] for tool in selected}
+        self.assertEqual(names, {"web_search"})
+        self.assertNotIn("send_media", names)
+        self.assertNotIn("browser_click", names)
+        self.assertNotIn("google_search", names)
+        self.assertNotIn("capability_search", names)
 
 
 if __name__ == "__main__":

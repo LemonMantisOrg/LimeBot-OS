@@ -94,7 +94,7 @@ Not a hardcoded system prompt. A living identity that evolves:
 ### 🌐 It Browses the Web
 Full Playwright-powered browser automation:
 - Navigate to any URL, click elements, fill forms, scroll pages
-- `google_search()` shortcut for quick lookups
+- `web_search()` for live web, news, and image lookup (the host parses results)
 - Extract page text, take DOM snapshots, list all media on a page
 - Download high-resolution images from Pinterest, Reddit, Wikimedia, direct URLs
 - Results stream back in real time with progress updates in the dashboard

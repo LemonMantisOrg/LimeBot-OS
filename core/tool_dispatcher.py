@@ -18,7 +18,6 @@ from typing import Any, Dict, Tuple
 # ── Module-level constants (re-exported so loop.py can import them) ───────
 
 TOOL_RESULT_LIMITS: Dict[str, int] = {
-    "capability_search": 4_000,
     "read_file": 8_000,
     "edit_file": 8_000,
     "inspect_skill": 4_000,
@@ -28,14 +27,9 @@ TOOL_RESULT_LIMITS: Dict[str, int] = {
     "diagnose_files": 8_000,
     "memory_search": 3_000,
     "browser_extract": 5_000,
-    "browser_get_page_text": 5_000,
-    "browser_snapshot": 3_000,
-    "google_search": 2_000,
+    "browser_act": 3_000,
     "web_search": 6_000,
-    "image_search": 2_500,
-    "deep_research": 8_000,
     "run_command": 2_000,
-    "browser_list_media": 1_000,
     "list_dir": 500,
     "generate_image": 2_000,
     "analyze_video": 30_000,
@@ -75,14 +69,10 @@ TAG_COMPAT_TOOLS = frozenset({
 TOOL_INTENT_RE = re.compile(
     r"\b("
     # Exact tool names
-    r"capability_search|read_file|edit_file|write_file|delete_file|list_dir|search_files|verify_files|diagnose_files|run_command|memory_search|memory_save|"
+    r"read_file|edit_file|write_file|delete_file|list_dir|search_files|verify_files|diagnose_files|run_command|memory_search|memory_save|"
     r"cron_add|cron_list|cron_remove|spawn_agent|generate_image|send_media|send_voice|analyze_video|"
-    # Search tool names
-    r"web_search|image_search|deep_research|"
-    # Browser tool names
-    r"browser_navigate|browser_click|browser_type|browser_snapshot|browser_scroll|"
-    r"browser_wait|browser_press_key|browser_go_back|browser_tabs|browser_switch_tab|"
-    r"browser_extract|browser_get_page_text|browser_list_media|google_search|"
+    r"web_search|"
+    r"browser_navigate|browser_act|browser_extract|"
     # System command keywords
     r"ls|pwd|cat|grep|find|mkdir|rm|cp|mv|npm|pip|python|bash|powershell|terminal|"
     r"command|directory|folder|path|cron|schedule|skill|"
@@ -127,9 +117,24 @@ TOOL_NAME_ALIASES: Dict[str, str] = {
     "cmd": "run_command",
     "websearch": "web_search",
     "search_web": "web_search",
-    "imagesearch": "image_search",
-    "search_images": "image_search",
-    "research": "deep_research",
+    "imagesearch": "web_search",
+    "search_images": "web_search",
+    "image_search": "web_search",
+    "google_search": "web_search",
+    "research": "web_search",
+    "deep_research": "web_search",
+    "browser_click": "browser_act",
+    "browser_type": "browser_act",
+    "browser_snapshot": "browser_act",
+    "browser_scroll": "browser_act",
+    "browser_wait": "browser_act",
+    "browser_press_key": "browser_act",
+    "browser_go_back": "browser_act",
+    "browser_tabs": "browser_act",
+    "browser_switch_tab": "browser_act",
+    "browser_download": "browser_act",
+    "browser_get_page_text": "browser_extract",
+    "browser_list_media": "browser_extract",
 }
 
 FILESYSTEM_ALIAS_ACTIONS: Dict[str, str] = {
@@ -285,6 +290,30 @@ def normalize_tool_alias(
                 or normalized_args.get("script")
                 or "",
             }
+        elif normalized_name == "web_search" and function_name in {
+            "image_search",
+            "imagesearch",
+            "search_images",
+        }:
+            normalized_args.setdefault("kind", "images")
+        elif normalized_name == "browser_act" and "action" not in normalized_args:
+            action_map = {
+                "browser_click": "click",
+                "browser_type": "type",
+                "browser_snapshot": "snapshot",
+                "browser_scroll": "scroll",
+                "browser_wait": "wait",
+                "browser_press_key": "press",
+                "browser_go_back": "back",
+                "browser_tabs": "tabs",
+                "browser_switch_tab": "switch_tab",
+                "browser_download": "download",
+            }
+            mapped_action = action_map.get(function_name)
+            if mapped_action:
+                normalized_args["action"] = mapped_action
+        elif normalized_name == "browser_extract" and function_name == "browser_list_media":
+            normalized_args.setdefault("mode", "media")
 
     if normalized_name != "filesystem":
         return normalized_name, normalized_args

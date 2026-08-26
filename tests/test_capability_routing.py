@@ -126,7 +126,7 @@ class TestCapabilityRouting(unittest.TestCase):
             )
             self.assertTrue({"run_command", "read_file"} <= first_names)
             self.assertTrue({"run_command", "read_file"} <= second_names)
-            self.assertIn("capability_search", second_names)
+            self.assertNotIn("capability_search", second_names)
             self.assertTrue(
                 agent._should_include_tools_for_turn("Sí la tienes", "web:test")
             )
@@ -160,50 +160,47 @@ class TestCapabilityRouting(unittest.TestCase):
                     for row in result["capabilities"]
                 )
             )
-            self.assertIn("capability_search", result["selected_tools"])
+            self.assertNotIn("capability_search", result["selected_tools"])
 
-    def test_capability_search_tool_executes_as_read_only_recovery_path(self):
-        import asyncio
-        import json
-
+    def test_capability_search_is_not_a_model_tool(self):
         from core.cache import ToolCache
         from core.loop import AgentLoop
         from core.tool_defs import build_tool_definitions
 
-        with TemporaryDirectory() as temp_dir:
-            agent = object.__new__(AgentLoop)
-            agent.skill_registry = self._jira_registry(Path(temp_dir))
-            agent._session_capability_state = {}
-            agent.config = SimpleNamespace(tool_shortlist_enabled=True)
-            agent._get_tool_definitions = lambda: build_tool_definitions(
-                enabled_skills=[]
-            )
-            agent._log_tool_debug = lambda *args, **kwargs: None
-            agent.subagent_registry = SimpleNamespace(
-                get_agent_descriptions=lambda: {}
-            )
-            agent.tool_cache = ToolCache()
+        names = {
+            tool["function"]["name"]
+            for tool in build_tool_definitions(enabled_skills=[])
+        }
+        self.assertNotIn("capability_search", names)
 
-            raw = asyncio.run(
-                agent._execute_tool(
-                    "capability_search",
-                    {"query": "Jira ticket", "include_disabled": True},
-                    "web:test",
-                )
+        agent = object.__new__(AgentLoop)
+        agent.skill_registry = None
+        agent._session_capability_state = {}
+        agent.config = SimpleNamespace(tool_shortlist_enabled=True)
+        agent._get_tool_definitions = lambda: build_tool_definitions(enabled_skills=[])
+        agent._log_tool_debug = lambda *args, **kwargs: None
+        agent.tool_cache = ToolCache()
+
+        import asyncio
+
+        raw = asyncio.run(
+            agent._execute_tool(
+                "capability_search",
+                {"query": "Jira ticket", "include_disabled": True},
+                "web:test",
             )
+        )
+        self.assertTrue(str(raw).startswith("Error:"))
+        self.assertIn("not available", str(raw))
 
-            result = json.loads(raw)
-            self.assertEqual(result["state"], "ready")
-            self.assertEqual(result["matched_skills"], ["jira"])
-
-    def test_capability_status_requests_require_initial_lookup_when_schema_is_present(self):
+    def test_explicit_research_requests_require_initial_tool_call(self):
         from core.loop import AgentLoop
 
-        tools = [{"function": {"name": "capability_search"}}]
+        tools = [{"function": {"name": "run_command"}}]
 
         self.assertTrue(
             AgentLoop._requires_initial_tool_call(
-                "Is the Jira integration connected?", tools
+                "Investigate the current Jira ticket", tools
             )
         )
         self.assertFalse(

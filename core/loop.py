@@ -105,6 +105,7 @@ from core.session_manager import SessionManager
 from core.skills import SkillRegistry
 from core.subagents import SubagentRegistry, normalize_subagent_tool_name
 from core.tag_parser import process_tags
+from core.media_intent import exclusive_tools_for_turn
 from core.tool_defs import shortlist_tool_definitions
 from core.tools import Toolbox
 from core.vectors import get_vector_service
@@ -139,9 +140,8 @@ CODING_PHASES = frozenset(
 )
 _READ_ONLY_TOOL_NAMES = frozenset(
     {
-        "capability_search", "read_file", "list_dir", "search_files", "verify_files", "diagnose_files", "memory_search", "web_search",
-        "image_search", "deep_research", "browser_extract", "browser_get_page_text",
-        "browser_snapshot", "browser_list_media", "google_search", "inspect_skill",
+        "read_file", "list_dir", "search_files", "verify_files", "diagnose_files", "memory_search", "web_search",
+        "browser_extract", "inspect_skill",
     }
 )
 _MUTATION_TOOL_NAMES = frozenset(
@@ -157,23 +157,9 @@ _MUTATION_TOOL_NAMES = frozenset(
 _RESEARCH_TOOL_NAMES = frozenset(
     {
         "web_search",
-        "google_search",
-        "deep_research",
-        "image_search",
         "browser_navigate",
-        "browser_click",
-        "browser_type",
-        "browser_snapshot",
-        "browser_scroll",
-        "browser_wait",
-        "browser_press_key",
-        "browser_go_back",
-        "browser_tabs",
-        "browser_switch_tab",
+        "browser_act",
         "browser_extract",
-        "browser_get_page_text",
-        "browser_list_media",
-        "browser_download",
     }
 )
 _ARTIFACT_REQUEST_RE = re.compile(
@@ -330,10 +316,17 @@ _DENY_WORDS = DENY_WORDS
 _AGENT_READINESS_TIMEOUT_S = 20.0
 _LLM_WARMUP_MAX_TOKENS = 16
 
-# Search tools drive Playwright (Google web/news, Bing/Google images).
-# google_search is kept as a back-compat alias.
+# Host-owned search. Legacy names still execute as web_search internally.
 _SEARCH_TOOLS = frozenset(
-    {"web_search", "image_search", "deep_research", "google_search"}
+    {
+        "web_search",
+        "image_search",
+        "google_search",
+        "deep_research",
+        "imagesearch",
+        "search_images",
+        "research",
+    }
 )
 
 from core.paths import PERSONA_DIR, USERS_DIR, MEMORY_DIR, SOUL_FILE, IDENTITY_FILE
@@ -811,7 +804,7 @@ class AgentLoop:
         except Exception:
             pass
         if not catalog:
-            return "\n--- CAPABILITY INVENTORY ---\nNo capabilities are currently discovered. Use `capability_search` before claiming an integration is unavailable.\n"
+            return ""
         lines = [
             "\n--- CAPABILITY INVENTORY ---",
             "Compact discovery snapshot (not full manuals). `ready` means a native tool is registered or a skill is enabled with declared dependencies present; it does not prove external credentials are connected.",
@@ -825,10 +818,7 @@ class AgentLoop:
             suffix = f"; tools: {required}" if required else ""
             lines.append(f"- `{name}` ({kind}) [{state}]: {desc}{suffix}")
         if len(catalog) > 32:
-            lines.append(f"- ... {len(catalog) - 32} more; use `capability_search` to resolve by name/task.")
-        lines.append(
-            "Before saying a requested capability is missing, call `capability_search` with the user's exact task or integration name."
-        )
+            lines.append(f"- ... {len(catalog) - 32} more capabilities.")
         return "\n".join(lines) + "\n"
 
     def _get_tool_definitions_for_turn(
@@ -857,18 +847,23 @@ class AgentLoop:
                 required_tool_names = list(dict.fromkeys(required_tool_names))
         else:
             required_tool_names = []
-        if selected_skill_names and any(
-            str(tool.get("function", {}).get("name") or "") == "capability_search"
+        channel = ""
+        if ":" in str(session_key or ""):
+            channel = str(session_key).split(":", 1)[0]
+        exclusive = exclusive_tools_for_turn(user_text, channel=channel)
+        if exclusive is not None:
+            selected = [
+                tool
             for tool in all_tools
-            if isinstance(tool, dict)
-        ):
-            if "capability_search" not in required_tool_names:
-                required_tool_names.append("capability_search")
-        if self._tool_shortlist_enabled():
+                if str(tool.get("function", {}).get("name") or "") in exclusive
+            ]
+            strategy = "intent_exclusive"
+        elif self._tool_shortlist_enabled():
             selected = shortlist_tool_definitions(
                 all_tools,
                 user_text,
                 required_tool_names=required_tool_names,
+                channel=channel,
             )
             strategy = "shortlist"
         else:
@@ -1933,7 +1928,7 @@ class AgentLoop:
                 forced_skill_name
             )
         elif media_delivery_turn:
-            # Native image_search + send_media is the whole job. Skill manuals
+            # Host-owned web_search(kind="images") is the whole job. Skill manuals
             # (especially download_image) compete with that path.
             skills_docs = ""
         else:
@@ -2272,7 +2267,7 @@ class AgentLoop:
             )
         ):
             # A terse acknowledgement still belongs to the active task. Keep
-            # schemas (including capability_search) available for verification.
+            # schemas available for verification.
             return True
         if not self._is_fast_ai_harness_enabled():
             return True
@@ -2294,21 +2289,11 @@ class AgentLoop:
             str(tool.get("function", {}).get("name", ""))
             for tool in tool_definitions
         }
-        if "capability_search" in tool_names and re.search(
-            r"\b(?:capability|capabilities|integration|integrations|mcp|"
-            r"connected|connection|unavailable|available|credentials?|credenciales?|"
-            r"conectad[oa]s?|conexi[oó]n|disponible)\b",
-            str(content or ""),
-            re.IGNORECASE,
-        ):
-            return True
         has_external_tool = bool(
             tool_names
             & {
                 "browser_navigate",
                 "web_search",
-                "deep_research",
-                "google_search",
                 "run_command",
             }
         )
@@ -4543,6 +4528,50 @@ class AgentLoop:
         self._normalize_history_in_place(session_key)
         self._mark_dirty(session_key)
 
+    async def _run_browser_act(self, browser, args: Dict[str, Any], on_progress=None):
+        action = str(args.get("action") or "snapshot").strip().lower()
+        if action == "snapshot":
+            return await browser.snapshot()
+        if action == "click":
+            return await browser.click(args.get("element_id", ""))
+        if action == "type":
+            return await browser.type_text(
+                args.get("element_id", ""), args.get("text", "")
+            )
+        if action == "scroll":
+            return await browser.scroll(
+                args.get("direction", "down"), args.get("amount", 500)
+            )
+        if action == "wait":
+            return await browser.wait(args.get("ms", 1000))
+        if action == "press":
+            return await browser.press_key(args.get("key", "Enter"))
+        if action == "back":
+            return await browser.go_back()
+        if action == "tabs":
+            return await browser.list_tabs()
+        if action == "switch_tab":
+            return await browser.switch_tab(args.get("index", 0))
+        if action == "download":
+            return await browser.download(
+                args.get("element_id", ""),
+                args.get("filename", ""),
+                args.get("timeout_ms", 30_000),
+                args.get("dest", ""),
+                args.get("url", ""),
+            )
+        return {"success": False, "error": f"Unknown browser_act action '{action}'"}
+
+    async def _run_browser_extract(self, browser, args: Dict[str, Any]):
+        mode = str(args.get("mode") or "text").strip().lower()
+        if mode == "media":
+            return await browser.list_media(on_progress=self.toolbox.send_progress)
+        if mode == "snapshot":
+            return await browser.snapshot()
+        return await browser.extract(
+            args.get("selector", "body"), limit=args.get("limit", 5000)
+        )
+
     async def _execute_browser_tool(
         self, function_name: str, args: Dict[str, Any], session_key: str
     ) -> Any:
@@ -4555,6 +4584,9 @@ class AgentLoop:
             dispatch: Dict[str, Any] = {
                 "browser_navigate": lambda: browser.navigate(
                     args.get("url", ""), on_progress=on_progress
+                ),
+                "browser_act": lambda: self._run_browser_act(
+                    browser, args, on_progress
                 ),
                 "browser_click": lambda: browser.click(args.get("element_id", "")),
                 "browser_download": lambda: browser.download(
@@ -4578,18 +4610,13 @@ class AgentLoop:
                 "browser_go_back": lambda: browser.go_back(),
                 "browser_tabs": lambda: browser.list_tabs(),
                 "browser_switch_tab": lambda: browser.switch_tab(args.get("index", 0)),
-                "browser_extract": lambda: browser.extract(
-                    args.get("selector", "body"), limit=args.get("limit", 5000)
-                ),
+                "browser_extract": lambda: self._run_browser_extract(browser, args),
                 "browser_extract_large": lambda: browser.extract(
                     args.get("selector", "body"), limit=100_000
                 ),
                 "browser_get_page_text": lambda: browser.get_page_text(),
                 "browser_list_media": lambda: browser.list_media(
                     on_progress=on_progress
-                ),
-                "google_search": lambda: browser.google_search(
-                    args.get("query", ""), on_progress=on_progress
                 ),
             }
 
@@ -4656,13 +4683,13 @@ class AgentLoop:
         session_key: str,
         on_progress=None,
     ):
-        """Run search in the real Playwright browser.
+        """Run host-owned search: fetch HTML, parse, retry engines internally.
 
         Returns a ``SearchResponse`` on success, or ``None`` with the last error
         string via the second tuple element.
         """
         from core.browser import BROWSER_INSTALL_HINT, PLAYWRIGHT_AVAILABLE
-        from core.web_search import search_response_from_browser
+        from core.web_search import run_host_search
 
         if not PLAYWRIGHT_AVAILABLE:
             return None, BROWSER_INSTALL_HINT
@@ -4677,16 +4704,12 @@ class AgentLoop:
             browser = await get_browser_manager(
                 session_key=session_key, config=self.config
             )
-            if kind == "images":
-                raw = await browser.image_search(
-                    query, on_progress=on_progress, count=count
-                )
-            else:
-                raw = await browser.google_search(
-                    query, on_progress=on_progress, count=count, kind=kind
-                )
-            resp = search_response_from_browser(
-                raw, query=query, kind=kind, count=count
+
+            async def fetch_html(url: str, scroll: bool = False) -> str:
+                return await browser.fetch_page_html(url, scroll=scroll)
+
+            resp = await run_host_search(
+                query, kind=kind, count=count, fetch_html=fetch_html
             )
             if resp.ok:
                 return resp, ""
@@ -4695,7 +4718,7 @@ class AgentLoop:
                 return None, BROWSER_INSTALL_HINT
         except Exception as e:
             last_err = str(e)
-            logger.warning(f"Browser search failed: {e}")
+            logger.warning(f"Host search failed: {e}")
             if BROWSER_INSTALL_HINT in last_err:
                 return None, BROWSER_INSTALL_HINT
 
@@ -4733,14 +4756,15 @@ class AgentLoop:
         if not query:
             return "Error: a search query is required."
 
-        if function_name == "deep_research":
-            return await self._run_deep_research(query, args, session_key)
-
-        if function_name == "image_search":
+        raw_kind = str(args.get("kind") or "web").strip().lower()
+        if function_name in {"image_search", "imagesearch", "search_images"}:
             kind = "images"
+        elif raw_kind in {"image", "images", "photo", "photos", "pic", "pics"}:
+            kind = "images"
+        elif raw_kind in {"news", "nws"}:
+            kind = "news"
         else:
-            raw_kind = str(args.get("kind") or "web").strip().lower()
-            kind = "news" if raw_kind == "news" else "web"
+            kind = "web"
 
         try:
             count = max(1, min(int(args.get("count") or DEFAULT_COUNT), MAX_COUNT))
@@ -4759,11 +4783,35 @@ class AgentLoop:
             ):
                 return f"Error: {BROWSER_INSTALL_HINT}"
             return (
-                f"Error: web search failed ({last_err or 'no results'}). "
-                "Do not repeat web_search with rephrased queries in this turn; "
-                "navigate to one known official URL or continue with explicit caveats."
+                f"Error: web search returned no usable results "
+                f"({last_err or 'empty'}). Answer from what you know and say the "
+                "live lookup was empty. Do not open a search engine in the browser."
             )
+        await self._maybe_host_attach_search_image(response, query)
         return format_search_response(response)
+
+    async def _maybe_host_attach_search_image(self, response, query: str) -> None:
+        """On media-delivery turns, the host attaches the best image itself."""
+        from core.context import tool_context
+        from core.media_intent import is_chat_media_delivery, is_image_generation_request
+
+        if getattr(response, "kind", "") != "images" or not getattr(response, "images", None):
+            return
+        ctx = tool_context.get() or {}
+        user_text = str(ctx.get("user_text") or query or "")
+        if not is_chat_media_delivery(user_text) or is_image_generation_request(user_text):
+            return
+        image = response.images[0]
+        caption = str(image.title or query or "").strip()
+        try:
+            result = await self.toolbox.attach_chat_image(image.image_url, caption)
+        except Exception as exc:
+            logger.warning(f"Host image attach failed: {exc}")
+            return
+        if str(result or "").startswith("Error:"):
+            logger.warning(f"Host image attach failed: {result}")
+            return
+        response.attached = True
 
     async def _run_deep_research(
         self, query: str, args: Dict[str, Any], session_key: str
@@ -5208,8 +5256,9 @@ class AgentLoop:
                     session_key=session_key, **function_args
                 )
             elif function_name == "capability_search":
-                result = await self._execute_capability_search(
-                    function_args, session_key
+                result = (
+                    "Error: capability_search is not available. Use the native tools "
+                    "and enabled skills directly."
                 )
             elif function_name in {"get_task_output", "wait_tasks", "kill_task"}:
                 result = await self._execute_background_task_tool(
@@ -5246,7 +5295,6 @@ class AgentLoop:
                     result = f"Error: Unknown tool '{function_name}'"
 
             is_read_only = function_name in _BROWSER_CACHEABLE or function_name in {
-                "capability_search",
                 "read_file",
                 "list_dir",
                 "search_files",
@@ -5254,7 +5302,6 @@ class AgentLoop:
                 "diagnose_files",
                 "memory_search",
                 "web_search",
-                "image_search",
                 "inspect_skill",
             }
             if result and not str(result).startswith("Error:") and is_read_only:
@@ -6350,6 +6397,7 @@ class AgentLoop:
                         "chat_id": msg.chat_id if msg else "system",
                         "turn_id": turn_id or "",
                         "message_id": message_id or "",
+                        "user_text": str(msg.content if msg else "")[:4000],
                         "attachments": current_image_attachments,
                         "recent_image_attachments": recent_image_attachments,
                         "auto_reference_images": bool(current_image_attachments)

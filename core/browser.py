@@ -1412,6 +1412,38 @@ class BrowserManager:
                 logger.error(f"Media extraction failed: {e}")
                 return {"success": False, "error": str(e)}
 
+    async def fetch_page_html(
+        self,
+        url: str,
+        on_progress=None,
+        wait_ms: int = 1200,
+        scroll: bool = False,
+    ) -> str:
+        """Navigate and return raw HTML for the host search parser.
+
+        Search is host-owned: this method must not be exposed as a model tool.
+        """
+        async with self._action_lock:
+            page = await self._ensure_browser()
+            target = str(url or "").strip()
+            if not target.startswith(("http://", "https://")):
+                raise ValueError("fetch_page_html requires an http(s) URL")
+            if on_progress:
+                await on_progress("🔍 Fetching search results")
+            await page.goto(target)
+            try:
+                delay = max(0, min(int(wait_ms), 8000))
+            except (TypeError, ValueError):
+                delay = 1200
+            await page.wait_for_timeout(delay)
+            if scroll:
+                try:
+                    await page.mouse.wheel(0, 1800)
+                    await page.wait_for_timeout(400)
+                except Exception:
+                    pass
+            return await page.content()
+
     async def google_search(
         self,
         query: str,

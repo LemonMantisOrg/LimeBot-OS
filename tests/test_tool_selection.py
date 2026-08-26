@@ -68,8 +68,8 @@ class TestToolSelection(unittest.TestCase):
         names = {tool["function"]["name"] for tool in shortlisted}
 
         self.assertIn("browser_navigate", names)
-        self.assertIn("browser_snapshot", names)
-        self.assertIn("browser_click", names)
+        self.assertIn("browser_act", names)
+        self.assertNotIn("browser_click", names)
         self.assertNotIn("read_file", names)
 
     def test_spanish_browser_export_workflow_keeps_complete_tool_chain(self):
@@ -88,9 +88,8 @@ class TestToolSelection(unittest.TestCase):
         self.assertTrue(
             {
                 "browser_navigate",
-                "browser_snapshot",
-                "browser_click",
-                "browser_download",
+                "browser_act",
+                "browser_extract",
                 "run_command",
                 "list_dir",
                 "read_file",
@@ -242,8 +241,7 @@ class TestToolSelection(unittest.TestCase):
         all_tools = [
             {"function": {"name": "read_file"}},
             {"function": {"name": "browser_navigate"}},
-            {"function": {"name": "browser_snapshot"}},
-            {"function": {"name": "browser_click"}},
+            {"function": {"name": "browser_act"}},
             {"function": {"name": "list_dir"}},
         ]
         agent._get_tool_definitions = lambda: all_tools
@@ -308,8 +306,7 @@ class TestToolSelection(unittest.TestCase):
         agent._get_tool_definitions = lambda: [
             {"function": {"name": "read_file"}},
             {"function": {"name": "browser_navigate"}},
-            {"function": {"name": "browser_snapshot"}},
-            {"function": {"name": "browser_click"}},
+            {"function": {"name": "browser_act"}},
             {"function": {"name": "list_dir"}},
         ]
         agent._log_tool_debug = lambda *args, **kwargs: None
@@ -360,30 +357,38 @@ class TestToolSelection(unittest.TestCase):
             "delete temp/output.json": {"delete_file"},
             "run pytest for the tests": {"run_command"},
             "open https://example.com then click and type into the form": {
-                "browser_navigate", "browser_click", "browser_type"
+                "browser_navigate", "browser_act"
             },
             "search the web for current Python news": {"web_search"},
-            "find an image of a lime": {"image_search", "send_media"},
-            "deep research this topic with sources": {"deep_research"},
+            "find an image of a lime": {"web_search"},
+            "deep research this topic with sources": {"web_search"},
             "recall what I told you yesterday": {"memory_search"},
             "remind me tomorrow at noon": {"cron_add"},
             "send a Discord DM": {"send_discord_message"},
-            "send this photo as an attachment": {"send_media"},
+            "send this photo as an attachment": {"web_search"},
             "send a voice note": {"send_voice"},
             "generate an image of a lime": {"generate_image"},
             "download a picture of rose of blackpink for me and send me that in this chat": {
-                "image_search",
-                "send_media",
+                "web_search",
             },
             "delegate this to a subagent": {"spawn_agent"},
         }
+        exclusive_prompts = {
+            "find an image of a lime",
+            "send this photo as an attachment",
+            "generate an image of a lime",
+            "download a picture of rose of blackpink for me and send me that in this chat",
+        }
         for prompt, required in cases.items():
             with self.subTest(prompt=prompt):
-                selected = shortlist_tool_definitions(tools, prompt)
+                selected = shortlist_tool_definitions(tools, prompt, channel="web")
                 names = {tool["function"]["name"] for tool in selected}
                 self.assertTrue(required <= names, (required, names))
                 self.assertLessEqual(len(selected), 12)
-                self.assertLess(len(json.dumps(selected)), len(json.dumps(tools)))
+                if prompt in exclusive_prompts:
+                    self.assertEqual(names, required)
+                else:
+                    self.assertLess(len(json.dumps(selected)), len(json.dumps(tools)))
 
         ambiguous = "help me with this"
         self.assertEqual(shortlist_tool_definitions(tools, ambiguous), tools)
