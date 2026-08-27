@@ -229,6 +229,27 @@ class TestNewsQualityRanking(unittest.TestCase):
         self.assertFalse(any("/history" in url for url in urls))
         self.assertIn("7.63", resp.results[0].snippet)
         self.assertIn("7.63", resp.answer)
+        self.assertNotIn("1.366", resp.answer)
+        self.assertFalse(any("calculator.net" in url for url in urls))
+        joined = " ".join(item.snippet for item in resp.results)
+        self.assertNotIn("1.366", joined)
+
+    def test_fx_rate_ignores_eur_usd_default_when_query_is_usd_gtq(self):
+        from core.search_parser import fx_rate_from_text
+
+        self.assertIsNone(
+            fx_rate_from_text(
+                "one euro is worth $1.366 USD",
+                "live USD to GTQ rate convert Q1000",
+            )
+        )
+        self.assertEqual(
+            fx_rate_from_text(
+                "USD/GTQ 7.63. 1 USD = 7.63 GTQ.",
+                "live USD to GTQ rate convert Q1000",
+            ),
+            7.63,
+        )
 
     def test_empty_xe_spa_html_has_no_rate_html_rate_is_kept(self):
         from core.search_parser import fx_rate_from_html
@@ -364,6 +385,36 @@ class TestHostSearchRetry(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("google.com" in url for url in fetched))
         self.assertTrue(any("bing.com" in url for url in fetched))
         self.assertFalse(any("xe.com" in url for url in fetched))
+
+    async def test_fx_wrong_pair_calculator_retries_html_gtq_rate(self):
+        fetched = []
+
+        async def fetch_html(url: str, scroll: bool = False) -> str:
+            fetched.append(url)
+            if "google.com" in url:
+                return _html("google_fx_calculator.html")
+            if "calculator.net" in url:
+                return "<html><body>one euro is worth $1.366 USD</body></html>"
+            if "bing.com" in url:
+                return _html("bing_fx_oanda.html")
+            if "oanda.com" in url:
+                return _html("fx_rate_html.html")
+            return ""
+
+        resp = await run_host_search(
+            "What's a live USD to GTQ rate convert Q1000",
+            kind="web",
+            count=8,
+            fetch_html=fetch_html,
+        )
+        self.assertTrue(resp.ok)
+        self.assertIn("7.63", resp.answer)
+        self.assertNotIn("1.366", resp.answer)
+        self.assertTrue(any("oanda.com" in item.url for item in resp.results))
+        self.assertFalse(any("calculator.net" in item.url for item in resp.results))
+        self.assertTrue(any("google.com" in url for url in fetched))
+        self.assertTrue(any("bing.com" in url for url in fetched))
+        self.assertFalse(any("calculator.net" in url for url in fetched))
 
     async def test_fx_html_page_fills_rate_when_snippet_has_no_number(self):
         fetched = []

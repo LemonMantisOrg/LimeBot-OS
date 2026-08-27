@@ -93,6 +93,8 @@ class TestFormatting(unittest.TestCase):
         self.assertIn("7.63", out)
         self.assertIn("Never refuse", out)
         self.assertNotIn("check Xe.com yourself", out)
+        self.assertNotIn("1.366", out)
+        self.assertIn("EUR/USD", out)
 
 
 class TestImageUrlFilter(unittest.TestCase):

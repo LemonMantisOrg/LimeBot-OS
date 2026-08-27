@@ -69,3 +69,10 @@ class TestFxExtractHint(unittest.TestCase):
             fx_empty_extract_note("1 USD = 7.63 GTQ", "https://www.xe.com/currencyconverter/"),
             "",
         )
+        wrong = fx_empty_extract_note(
+            "one euro is worth $1.366 USD",
+            "https://www.calculator.net/currency-calculator.html",
+        )
+        self.assertIn("Do not use this number", wrong)
+        self.assertIn("USD/GTQ", wrong)
+        self.assertNotIn("check the site themselves", wrong.lower())

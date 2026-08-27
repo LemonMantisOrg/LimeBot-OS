@@ -231,6 +231,23 @@ _FX_HISTORY_TEXT = (
     "rates in 20",
 )
 
+# Landing pages that often render a default EUR/USD (or similar) rate.
+_FX_GENERIC_CONVERTER_HOSTS = (
+    "calculator.net",
+)
+
+_ISO_CURRENCY_RE = re.compile(
+    r"\b(usd|eur|gbp|jpy|gtq|mxn|cad|aud|chf|cny|hkd|inr|brl|krw|"
+    r"nzd|sek|nok|dkk|pln|try|zar|sgd|thb|php|idr)\b",
+    re.I,
+)
+
+_CURRENCY_ALIASES = {
+    "usd": (r"us\s*dollar", r"u\.s\.\s*dollar", r"united states dollar"),
+    "gtq": (r"quetzales?", r"guatemalan quetzal"),
+    "eur": (r"\beuros?\b",),
+}
+
 
 def _http_url(value: Any, base: str = "") -> str:
     url = str(value or "").strip()
@@ -478,6 +495,8 @@ def is_fx_query(query: str) -> bool:
     q = str(query or "").lower()
     if re.search(r"\b(?:usd|eur|gbp|jpy|gtq|mxn|cad|fx|forex)\b", q):
         return True
+    if re.search(r"\bq\s*\d{2,}", q) or "quetzal" in q:
+        return True
     return bool(re.search(r"exchange\s+rate|currency|convert\b.{0,40}\b(?:to|from)\b", q))
 
 
@@ -485,13 +504,73 @@ def is_fx_spa_host(url: str) -> bool:
     return _host_in(_normalized_host(url), _FX_SPA_HOSTS)
 
 
+def is_fx_generic_converter_host(url: str) -> bool:
+    return _host_in(_normalized_host(url), _FX_GENERIC_CONVERTER_HOSTS)
+
+
+def fx_query_currencies(query: str) -> frozenset[str]:
+    """ISO codes the user asked to convert, e.g. USD+GTQ from 'USD to GTQ' or Q1000."""
+    q = re.sub(r"[/\-_]", " ", str(query or "").lower())
+    found = {code.lower() for code in _ISO_CURRENCY_RE.findall(q)}
+    if re.search(r"quetzal", q) or re.search(r"\bq\s*\d{2,}", q):
+        found.add("gtq")
+    if re.search(r"\beuros?\b", q):
+        found.add("eur")
+    if re.search(r"us\s*dollar|u\.s\.\s*dollar|united states dollar", q):
+        found.add("usd")
+    return frozenset(found)
+
+
+def _fx_text_has_currency(blob: str, code: str, wanted: frozenset[str] | None = None) -> bool:
+    text = str(blob or "").lower()
+    if re.search(rf"\b{re.escape(code)}\b", text):
+        return True
+    for pattern in _CURRENCY_ALIASES.get(code, ()):
+        if re.search(pattern, text):
+            return True
+    if code == "usd" and wanted and "usd" in wanted and re.search(r"\bdollars?\b", text):
+        return True
+    return False
+
+
+def fx_text_has_query_pair(blob: str, query: str) -> bool:
+    wanted = fx_query_currencies(query)
+    if len(wanted) < 2:
+        return True
+    text = str(blob or "").lower()
+    return all(_fx_text_has_currency(text, code, wanted) for code in wanted)
+
+
+def fx_result_matches_pair(
+    query: str, url: str, title: str = "", snippet: str = ""
+) -> bool:
+    return fx_text_has_query_pair(f"{url} {title} {snippet}", query)
+
+
+def is_fx_off_pair_result(
+    query: str, url: str, title: str = "", snippet: str = ""
+) -> bool:
+    """True when a converter card is not the query pair (e.g. EUR/USD for USD/GTQ)."""
+    if not is_fx_query(query):
+        return False
+    wanted = fx_query_currencies(query)
+    if len(wanted) < 2:
+        return False
+    return not fx_result_matches_pair(query, url, title, snippet)
+
+
 def fx_rate_from_text(text: str, query: str = "") -> float | None:
     """Return the first plausible live FX rate in visible text, or None.
 
-    Integers such as Q1000 and years are ignored. USD/GTQ prefers 6.5–9.5.
+    Integers such as Q1000 and years are ignored. A USD/GTQ query only accepts
+    a 6.5–9.5 GTQ-per-USD figure from text that names both currencies — never a
+    leftover EUR/USD default such as 1.366.
     """
     blob = str(text or "")
     if not blob:
+        return None
+    wanted = fx_query_currencies(query)
+    if len(wanted) >= 2 and not fx_text_has_query_pair(blob, query):
         return None
     matches = [
         float(match.group(1))
@@ -499,11 +578,9 @@ def fx_rate_from_text(text: str, query: str = "") -> float | None:
     ]
     if not matches:
         return None
-    q = str(query or "").lower() + " " + blob.lower()
-    if re.search(r"\bgtq\b|quetzal", q):
+    if "gtq" in wanted or _fx_text_has_currency(blob, "gtq", wanted):
         gtq = [value for value in matches if 6.5 <= value <= 9.5]
-        if gtq:
-            return gtq[0]
+        return gtq[0] if gtq else None
     for value in matches:
         if 0.10 <= value <= 99.99:
             return value
@@ -519,11 +596,12 @@ def fx_rate_from_html(html: str, query: str = "") -> float | None:
 
 
 def fx_empty_extract_note(text: str, url: str) -> str:
-    """Host hint when a converter extract has no numeric rate."""
+    """Host hint when a converter extract has no usable USD/GTQ rate."""
     host = _normalized_host(url)
     path = (urlparse(str(url or "")).path or "").lower()
     looks_like_fx = (
         is_fx_spa_host(url)
+        or is_fx_generic_converter_host(url)
         or _host_in(host, _FX_PREFERRED_HOSTS)
         or "currency" in path
         or "converter" in path
@@ -532,11 +610,20 @@ def fx_empty_extract_note(text: str, url: str) -> str:
     )
     if not looks_like_fx:
         return ""
-    if fx_rate_from_text(text, url) is not None:
+    blob = f"{url} {text}".lower()
+    has_gtq = _fx_text_has_currency(blob, "gtq")
+    has_eur = _fx_text_has_currency(blob, "eur")
+    if has_eur and not has_gtq:
+        return (
+            "This snapshot is not USD/GTQ (likely a default EUR/USD calculator). "
+            "Do not use this number. Call web_search for USD GTQ or "
+            "browser_navigate an HTML USD/GTQ page (oanda, x-rates, exchanging)."
+        )
+    if fx_rate_from_text(f"{url} {text}", "USD GTQ") is not None:
         return ""
     return (
         "No numeric FX rate in this snapshot (likely a JS shell). Do not refuse. "
-        "Call web_search for the pair and use a snippet rate, or browser_navigate a "
+        "Call web_search for USD GTQ and use a snippet rate, or browser_navigate a "
         "different HTML current-rate page (oanda, x-rates, exchanging)."
     )
 
@@ -558,17 +645,23 @@ def fx_result_boost(query: str, url: str, title: str = "", snippet: str = "") ->
         return 0
     if is_fx_history_result(url, title, snippet):
         return -200
+    if is_fx_off_pair_result(query, url, title, snippet):
+        return -200
     host = _normalized_host(url)
     path = (urlparse(url).path or "").lower()
     score = 0
     if is_fx_spa_host(url):
         score -= 80
+    if is_fx_generic_converter_host(url):
+        score -= 80
     if _host_in(host, _FX_PREFERRED_HOSTS):
         score += 90
-    if fx_rate_from_text(f"{title} {snippet}", query) is not None:
+    if fx_rate_from_text(f"{url} {title} {snippet}", query) is not None:
         score += 80
     if any(marker in path for marker in ("/converter", "/convert", "/live", "usd-", "-usd", "gtq")):
         score += 20
+    if "gtq" in f"{url} {title} {snippet}".lower() or "quetzal" in f"{title} {snippet}".lower():
+        score += 30
     return score
 
 
@@ -609,6 +702,8 @@ def should_drop_web_result(
     if kind == "news":
         return is_news_junk_result(url, title, snippet)
     if is_fx_query(query) and is_fx_history_result(url, title, snippet):
+        return True
+    if is_fx_query(query) and is_fx_off_pair_result(query, url, title, snippet):
         return True
     if is_python_docs_query(query):
         host = _normalized_host(url)
@@ -686,9 +781,14 @@ def prepare_web_results(
         if should_drop_web_result(query, url, title, snippet, kind=kind):
             continue
         if is_fx_query(query):
-            rate = fx_rate_from_text(f"{title} {snippet}", query)
+            rate = fx_rate_from_text(f"{url} {title} {snippet}", query)
             if rate is not None and "live rate" not in snippet.lower():
-                snippet = f"Live rate ≈ {rate}. {snippet}".strip()
+                if "gtq" in fx_query_currencies(query):
+                    snippet = (
+                        f"Live rate ≈ {rate} (GTQ per 1 USD). {snippet}"
+                    ).strip()
+                else:
+                    snippet = f"Live rate ≈ {rate}. {snippet}".strip()
         cleaned.append({"title": title, "url": url, "snippet": snippet})
     cleaned = rank_web_results(dedupe_web_results(cleaned), query, kind=kind)
     if is_fx_query(query) and any(
