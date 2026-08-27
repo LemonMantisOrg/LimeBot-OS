@@ -781,8 +781,9 @@ BROWSER_TOOLS = [
     {
         "name": "browser_navigate",
         "description": (
-            "Open a specific webpage when you already have a URL. Do not use this to "
-            "search Google or find a photo — call web_search for that. Follow with "
+            "Open a specific webpage. You can open pages. Use this whenever the user "
+            "names a URL or asks to open, visit, or go to a page. Do not use this to "
+            "search Google or find a photo — call web_search for lookup only. Follow with "
             "browser_act(action='snapshot') then click/type/download, or browser_extract."
         ),
         "params": {
@@ -893,10 +894,12 @@ SEARCH_TOOLS = [
     {
         "name": "web_search",
         "description": (
-            "Host-owned live search. The host looks up the query and returns structured "
-            "results. Use kind='images' to find existing photos (the host attaches the "
-            "best image on a send-photo request). Use kind='news' for recent news. "
-            "Do not open a search engine with browser tools. "
+            "Host-owned live search for lookup queries (facts, headlines, existing photos). "
+            "The host looks up the query and returns structured results. Use kind='images' "
+            "to find existing photos (the host attaches the best image on a send-photo "
+            "request). Use kind='news' for recent news. If the user named a page URL or "
+            "asked to open/visit/go to a page, call browser_navigate instead — you can "
+            "open pages. Do not open a search engine with browser tools. "
             "Example: web_search(query='Rosé BLACKPINK', kind='images')."
         ),
         "params": {
@@ -1237,13 +1240,33 @@ _TOOL_HINTS = {
     },
     "send_voice": {"voice", "audio", "speak", "say", "voicenote", "tts", "read", "aloud", "message"},
     "analyze_video": {"video", "watch", "transcript", "caption", "youtube", "youtu", "vimeo", "tiktok", "loom", "mp4", "mov", "mkv", "webm", "m4v", "avi", "recording"},
-    "browser_navigate": {"url", "open", "visit", "navigate", "website", "web"},
+    "browser_navigate": {
+        "url", "open", "visit", "navigate", "website", "web", "browser", "page",
+        "https", "http",
+    },
     "browser_act": {
         "click", "type", "scroll", "snapshot", "press", "download", "export",
         "form", "button", "tab", "wait", "descarga", "exportar",
     },
     "browser_extract": {"extract", "article", "text", "table", "content", "scrape", "media"},
 }
+
+
+_NAMED_PAGE_RE = re.compile(
+    r"(?:"
+    r"https?://"
+    r"|\bwww\."
+    r"|\bopen\b[\s\S]{0,80}\b(?:browser|page|site|url|website|link)\b"
+    r"|\b(?:visit|navigate)\b[\s\S]{0,80}\b(?:page|site|url|website|link|browser)\b"
+    r"|\bgo\s+to\b[\s\S]{0,80}\b(?:https?://|www\.|page|site|url|website)"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def user_named_a_page(text: str) -> bool:
+    """True when the user named a URL or asked to open/visit/go to a page."""
+    return bool(_NAMED_PAGE_RE.search(text or ""))
 
 
 def _tokenize(text: str) -> set[str]:
@@ -1318,7 +1341,7 @@ def shortlist_tool_definitions(
     ):
         selected_families.discard("spreadsheet")
 
-    if any(marker in lowered for marker in ("http://", "https://", "www.")):
+    if user_named_a_page(text):
         selected_families.add("browser")
     artifact_tokens = {
         "download", "downloaded", "export", "exported", "spreadsheet", "excel",
@@ -1509,8 +1532,8 @@ def build_tool_definitions(
     Args:
         enabled_skills: List of enabled skill names from config.
         available_agents: Named subagent profiles for spawn_agent.
-        search_available: Unused; search tools are always registered. Missing
-            Playwright fails at execution with the browser install hint.
+        search_available: Unused; search and browser tools are always registered.
+            Missing Playwright fails at execution with the browser install hint.
 
     Returns:
         List of OpenAI-compatible tool definition dicts.
@@ -1526,12 +1549,11 @@ def build_tool_definitions(
         else:
             tools.append(_inflate_tool(tool_def))
 
-    browser_enabled = "browser" in enabled_skills
-
     _ = search_available
+    _ = enabled_skills
+    # Search and browser tools stay registered even when the browser skill is
+    # off. Missing Playwright fails at execution with BROWSER_INSTALL_HINT.
     tools.extend(_inflate_tool(t) for t in SEARCH_TOOLS)
-
-    if browser_enabled:
-        tools.extend(_inflate_tool(t) for t in BROWSER_TOOLS)
+    tools.extend(_inflate_tool(t) for t in BROWSER_TOOLS)
 
     return tools

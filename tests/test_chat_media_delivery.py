@@ -109,6 +109,9 @@ class TestChatMediaPromptAndTools(unittest.TestCase):
         }
         self.assertNotIn("image_search", names)
         self.assertIn("web_search", names)
+        self.assertIn("browser_navigate", names)
+        self.assertIn("browser_act", names)
+        self.assertIn("browser_extract", names)
         kinds = next(
             tool["function"]["parameters"]["properties"]["kind"]["enum"]
             for tool in build_tool_definitions(enabled_skills=[])
@@ -308,15 +311,16 @@ class TestHostOwnedPhotoAttach(unittest.IsolatedAsyncioTestCase):
     def test_browser_surface_is_three_tools(self):
         from core.tool_defs import build_tool_definitions
 
-        names = {
-            tool["function"]["name"]
-            for tool in build_tool_definitions(enabled_skills=["browser"])
-        }
-        browser_names = {name for name in names if name.startswith("browser_")}
-        self.assertEqual(
-            browser_names,
-            {"browser_navigate", "browser_act", "browser_extract"},
-        )
+        for skills in ([], ["browser"]):
+            names = {
+                tool["function"]["name"]
+                for tool in build_tool_definitions(enabled_skills=skills)
+            }
+            browser_names = {name for name in names if name.startswith("browser_")}
+            self.assertEqual(
+                browser_names,
+                {"browser_navigate", "browser_act", "browser_extract"},
+            )
 
     def test_exclusive_shortlist_applies_even_when_global_shortlist_is_off(self):
         from core.loop import AgentLoop

@@ -106,6 +106,78 @@ _RELEASE_PATH_MARKERS = (
     "/news/release",
 )
 
+# World desks ranked first for kind=news.
+_NEWS_PREFERRED_HOSTS = (
+    "reuters.com",
+    "apnews.com",
+    "ap.org",
+    "bbc.com",
+    "bbc.co.uk",
+    "afp.com",
+    "nytimes.com",
+    "washingtonpost.com",
+    "theguardian.com",
+    "aljazeera.com",
+    "npr.org",
+    "ft.com",
+    "wsj.com",
+    "economist.com",
+    "dw.com",
+    "france24.com",
+    "abc.net.au",
+    "thehindu.com",
+    "cnn.com",
+    "cbsnews.com",
+    "nbcnews.com",
+)
+
+# School-assembly, exam-prep, and aggregator-of-aggregators hosts.
+_NEWS_JUNK_HOSTS = (
+    "jagranjosh.com",
+    "abplive.com",
+    "byjus.com",
+    "vedantu.com",
+    "unacademy.com",
+    "testbook.com",
+    "adda247.com",
+    "gradeup.co",
+    "careerpower.in",
+    "affairscloud.com",
+    "bankersadda.com",
+    "sscadda.com",
+    "studyiq.com",
+    "oliveboard.in",
+    "examrace.com",
+    "gktoday.in",
+)
+
+# Leftover click chrome after unwrap. Real desks reached via url= are kept.
+_NEWS_WRAPPER_HOSTS = (
+    "msn.com",
+    "bing.com",
+    "news.google.com",
+    "flipboard.com",
+    "smartnews.com",
+)
+
+_NEWS_JUNK_TEXT = (
+    "school assembly",
+    "school-assembly",
+    "morning assembly",
+    "for school students",
+    "exam prep",
+    "exam-prep",
+    "current affairs for",
+    "competitive exam",
+    "bank exam",
+    "ssc cgl",
+    "ibps po",
+    "upsc ",
+    "gk quiz",
+    "gk today",
+    "daily current affairs",
+)
+
 
 def _http_url(value: Any, base: str = "") -> str:
     url = str(value or "").strip()
@@ -148,7 +220,16 @@ def _is_organic_wrapper(url: str) -> bool:
     path = (parsed.path or "").lower()
     if path.startswith("/url") or "imgres" in path:
         return True
-    if "bing.com" in host and path.startswith("/ck/") and "/aclk" not in path:
+    if "bing.com" in host and "/aclk" not in path:
+        if (
+            path.startswith("/ck/")
+            or path.startswith("/news/apiclick")
+            or "apiclick.aspx" in path
+        ):
+            return True
+    if "msn.com" in host and (
+        "apiclick" in path or "linkredir" in path or path.startswith("/click")
+    ):
         return True
     if "duckduckgo.com" in host and ("uddg" in (parsed.query or "") or path.startswith("/l/")):
         return True
@@ -256,21 +337,27 @@ def usable_image_url(value: Any) -> str:
     return url
 
 
-def result_identity(url: str) -> str:
-    """Registrable-host + path identity used to dedupe organic cards."""
-    parsed = urlparse(str(url or ""))
-    host = (parsed.netloc or "").lower()
+def _normalized_host(url: str) -> str:
+    host = (urlparse(str(url or "")).netloc or "").lower()
     if host.startswith("www."):
         host = host[4:]
-    path = (parsed.path or "/").rstrip("/") or "/"
+    return host
+
+
+def _host_in(host: str, names: tuple[str, ...]) -> bool:
+    return any(host == name or host.endswith("." + name) for name in names)
+
+
+def result_identity(url: str) -> str:
+    """Registrable-host + path identity used to dedupe organic cards."""
+    host = _normalized_host(url)
+    path = (urlparse(str(url or "")).path or "/").rstrip("/") or "/"
     return f"{host}{path}"
 
 
 def official_result_boost(query: str, url: str) -> int:
     """Higher scores win. Official software hosts beat blogs and leftovers."""
-    host = (urlparse(url).netloc or "").lower()
-    if host.startswith("www."):
-        host = host[4:]
+    host = _normalized_host(url)
     path = (urlparse(url).path or "").lower()
     tokens = set(re.findall(r"[a-z0-9]+", (query or "").lower()))
     score = 0
@@ -287,6 +374,26 @@ def official_result_boost(query: str, url: str) -> int:
     if path in {"", "/"} and score:
         score += 5
     return score
+
+
+def news_result_boost(url: str) -> int:
+    """World desks outrank leftover aggregators for kind=news."""
+    if _host_in(_normalized_host(url), _NEWS_PREFERRED_HOSTS):
+        return 100
+    return 0
+
+
+def is_news_junk_result(url: str, title: str = "", snippet: str = "") -> bool:
+    """Drop school-assembly, exam-prep, and leftover MSN/Bing click chrome."""
+    host = _normalized_host(url)
+    if _host_in(host, _NEWS_JUNK_HOSTS) or _host_in(host, _NEWS_WRAPPER_HOSTS):
+        return True
+    blob = f"{title} {snippet} {url}".lower()
+    if any(marker in blob for marker in _NEWS_JUNK_TEXT):
+        return True
+    if "bingnewservp" in blob or "apiclick.aspx" in blob:
+        return True
+    return False
 
 
 def _dedupe(rows: Iterable[Dict[str, Any]], key: str) -> List[Dict[str, Any]]:
@@ -314,17 +421,26 @@ def dedupe_web_results(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
-def rank_web_results(rows: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+def rank_web_results(
+    rows: List[Dict[str, Any]], query: str, kind: str = "web"
+) -> List[Dict[str, Any]]:
+    news = str(kind or "web").strip().lower() == "news"
+
+    def _key(item: tuple[int, Dict[str, Any]]) -> tuple:
+        idx, row = item
+        url = str(row.get("url") or "")
+        news_boost = news_result_boost(url) if news else 0
+        return (-news_boost, -official_result_boost(query, url), idx)
+
     indexed = list(enumerate(rows))
-    indexed.sort(
-        key=lambda item: (-official_result_boost(query, str(item[1].get("url") or "")), item[0])
-    )
+    indexed.sort(key=_key)
     return [row for _, row in indexed]
 
 
 def prepare_web_results(
-    rows: Iterable[Dict[str, Any]], query: str, limit: int
+    rows: Iterable[Dict[str, Any]], query: str, limit: int, kind: str = "web"
 ) -> List[Dict[str, Any]]:
+    news = str(kind or "web").strip().lower() == "news"
     cleaned: List[Dict[str, Any]] = []
     for item in rows or []:
         if not isinstance(item, dict):
@@ -332,14 +448,12 @@ def prepare_web_results(
         url = usable_result_url(item.get("url"))
         if not url:
             continue
-        cleaned.append(
-            {
-                "title": str(item.get("title") or url),
-                "url": url,
-                "snippet": str(item.get("snippet") or "")[:600],
-            }
-        )
-    cleaned = rank_web_results(dedupe_web_results(cleaned), query)
+        title = str(item.get("title") or url)
+        snippet = str(item.get("snippet") or "")[:600]
+        if news and is_news_junk_result(url, title, snippet):
+            continue
+        cleaned.append({"title": title, "url": url, "snippet": snippet})
+    cleaned = rank_web_results(dedupe_web_results(cleaned), query, kind=kind)
     if limit > 0:
         return cleaned[:limit]
     return cleaned

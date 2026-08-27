@@ -426,8 +426,8 @@ class Toolbox:
             except Exception as e:
                 logger.warning(f"Failed to read subagent registry: {e}")
 
-        # Search tools always stay registered; missing Playwright fails at
-        # execution with BROWSER_INSTALL_HINT rather than hiding the tools.
+        # Search and browser tools always stay registered; missing Playwright
+        # fails at execution with BROWSER_INSTALL_HINT rather than hiding them.
         tools = build_tool_definitions(
             enabled_skills,
             available_agents=available_agents,

@@ -192,7 +192,7 @@ def search_response_from_parsed(
             resp.error = "no image results"
         return resp
 
-    for item in prepare_web_results(rows, query, limit):
+    for item in prepare_web_results(rows, query, limit, kind=kind):
         resp.results.append(
             SearchResult(
                 title=str(item.get("title") or item.get("url") or ""),
@@ -244,14 +244,18 @@ def _web_results_sufficient(resp: SearchResponse, kind: str, count: int) -> bool
 
 
 def _merge_web_results(
-    existing: List[SearchResult], incoming: List[SearchResult], query: str, limit: int
+    existing: List[SearchResult],
+    incoming: List[SearchResult],
+    query: str,
+    limit: int,
+    kind: str = "web",
 ) -> List[SearchResult]:
     rows = [
         {"title": item.title, "url": item.url, "snippet": item.snippet}
         for item in existing + incoming
         if item.url
     ]
-    merged = prepare_web_results(rows, query, limit)
+    merged = prepare_web_results(rows, query, limit, kind=kind)
     return [
         SearchResult(
             title=str(item.get("title") or ""),
@@ -311,7 +315,7 @@ async def run_host_search(
             continue
         if candidate.results:
             accumulated = _merge_web_results(
-                accumulated, candidate.results, query, _clamp_count(count)
+                accumulated, candidate.results, query, _clamp_count(count), kind=kind
             )
         if _web_results_sufficient(
             SearchResponse(kind=kind, query=query, results=list(accumulated)),

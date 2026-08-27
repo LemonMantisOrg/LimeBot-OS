@@ -178,9 +178,9 @@ Sandboxed OS interface. All methods check `_is_path_allowed()` before touching t
 | `cron_remove(job_id)` | **Yes** | Cancel a scheduled job |
 | `spawn_agent(task, isolation)` | No | Delegate a long, parallelizable, or specialist-matched task; `auto` isolates coding/review work, `copy` always captures changes in a temporary workspace, and `none` explicitly shares the live workspace |
 | `analyze_video(source, question, detail, start, end, max_frames, resolution)` | No | Analyze an allowed local video or public HTTP(S) video and return a transcript plus up to three contact sheets. |
-| `browser_navigate(url)` | No | Open a specific webpage when you already have a URL. Do not use this to search |
-| `browser_act(action, ...)` | No | Snapshot, click, type, scroll, wait, press, back, tabs, switch_tab, or download on the current page |
-| `browser_extract(mode, selector)` | No | Read visible page text or list media. Do not use this to search |
+| `browser_navigate(url)` | No | Open a specific webpage. Always registered (the browser skill is not required). Named URLs and open/visit/go-to requests use this, not `web_search` |
+| `browser_act(action, ...)` | No | Snapshot, click, type, scroll, wait, press, back, tabs, switch_tab, or download on the current page. Always registered with `browser_navigate` |
+| `browser_extract(mode, selector)` | No | Read visible page text or list media. Do not use this to search. Always registered with `browser_navigate` |
 
 ### `core/video/` — Native Video Analysis
 
@@ -230,7 +230,7 @@ explicit parent-side action.
 | `list_dir` | 500 chars |
 | Everything else | 2,000 chars |
 
-**Web search (`core/web_search.py`)** — one model-facing tool: `web_search(kind=web|news|images)`. The host fetches SERP HTML (Playwright internally), parses organic cards, drops ads and tracking URLs (`aclk`, DoubleClick, Google Ads, leftover click-wrappers), unwraps Bing organic `ck/a` destinations, ranks official hosts for software version queries, and retries another engine when a layout is empty, ads-only, or thinner than three organic hits. Engine names and browser clicks are not model tools. There is no Tavily / Brave Search API / SerpAPI / DuckDuckGo i.js provider chain. If Playwright is missing, search fails with `BROWSER_INSTALL_HINT` (`npm run lime-bot feature install browser && npm run install-browser`). Empty results tell the model to answer from what it knows — never to open a search engine.
+**Web search (`core/web_search.py`)** — one model-facing tool: `web_search(kind=web|news|images)`. The host fetches SERP HTML (Playwright internally), parses organic cards, drops ads and tracking URLs (`aclk`, DoubleClick, Google Ads, leftover click-wrappers), unwraps Bing organic `ck/a` and news `apiclick` destinations, ranks official hosts for software version queries, and retries another engine when a layout is empty, ads-only, or thinner than three organic hits. For `kind=news`, school-assembly / exam-prep hosts and leftover MSN BingNewsVerp / click chrome are dropped; world desks (Reuters, AP, BBC, AFP, NYT, Washington Post, The Guardian, Al Jazeera, and similar) are ranked first. Engine names and browser clicks are not model tools. There is no Tavily / Brave Search API / SerpAPI / DuckDuckGo i.js provider chain. If Playwright is missing, search fails with `BROWSER_INSTALL_HINT` (`npm run lime-bot feature install browser && npm run install-browser`). Empty results tell the model to answer from what it knows — never to open a search engine. A named page URL is `browser_navigate`, not search; `browser_navigate` / `browser_act` / `browser_extract` stay registered even when the browser skill is off.
 
 **Chat photo delivery:** "download/send me a picture of X in this chat" is `web_search(kind="images")`. The host downloads the best image URL and stamps `metadata.image` + `attachments` on the web outbound message. That is not `generate_image`, `spawn_agent`, `send_media`, or `run_command`. Live chat media fetch is not a filesystem write and does not need confirmation. Discord/WhatsApp may still use `send_media` for file share.
 

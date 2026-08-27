@@ -118,6 +118,94 @@ class TestAdAndTrackingFilter(unittest.TestCase):
         python = next(row for row in rows if "python.org/downloads" in row["url"])
         self.assertIn("official home", python["snippet"].lower())
 
+
+class TestNewsQualityRanking(unittest.TestCase):
+    def test_mixed_news_serp_keeps_world_desks_drops_school_assembly(self):
+        rows = parse_bing_serp(_html("bing_news_mixed.html"))
+        urls = [row["url"] for row in rows]
+        self.assertIn("https://www.reuters.com/world/top-news-today/", urls)
+        self.assertIn("https://www.bbc.com/news/world-123", urls)
+        self.assertTrue(any("jagranjosh.com" in url for url in urls))
+        self.assertFalse(any("apiclick" in url for url in urls))
+
+        resp = search_response_from_parsed(
+            rows, query="top world news headlines", kind="news", count=8
+        )
+        self.assertTrue(resp.ok)
+        ranked = [item.url for item in resp.results]
+        self.assertIn("https://www.reuters.com/world/top-news-today/", ranked)
+        self.assertIn("https://www.bbc.com/news/world-123", ranked)
+        self.assertTrue(
+            ranked[0].startswith("https://www.reuters.com/")
+            or ranked[0].startswith("https://www.bbc.com/")
+        )
+        self.assertFalse(any("jagranjosh.com" in url for url in ranked))
+        self.assertFalse(any("abplive.com" in url for url in ranked))
+        self.assertFalse(any("msn.com" in url for url in ranked))
+        self.assertFalse(any("BingNewsVerp" in url for url in ranked))
+
+        resp = search_response_from_parsed(
+            rows, query="top world news headlines", kind="news", count=8
+        )
+        self.assertTrue(resp.ok)
+        ranked = [item.url for item in resp.results]
+        self.assertIn("https://www.reuters.com/world/top-news-today/", ranked)
+        self.assertIn("https://www.bbc.com/news/world-123", ranked)
+        self.assertTrue(
+            ranked[0].startswith("https://www.reuters.com/")
+            or ranked[0].startswith("https://www.bbc.com/")
+        )
+        self.assertFalse(any("jagranjosh.com" in url for url in ranked))
+        self.assertFalse(any("abplive.com" in url for url in ranked))
+        self.assertFalse(any("msn.com" in url for url in ranked))
+        self.assertFalse(any("BingNewsVerp" in url for url in ranked))
+
+    def test_prepare_web_results_drops_school_assembly_only_for_news(self):
+        from core.search_parser import prepare_web_results
+
+        rows = [
+            {
+                "title": "Top 10 World News Headlines Today for School Assembly",
+                "url": "https://www.jagranjosh.com/general-knowledge/school-assembly",
+                "snippet": "Current affairs for school assembly and exam prep.",
+            },
+            {
+                "title": "World news",
+                "url": "https://www.reuters.com/world/top-news-today/",
+                "snippet": "Reuters world desk headlines.",
+            },
+            {
+                "title": "Recycled world roundup",
+                "url": (
+                    "https://www.msn.com/en-us/news/world/recycled-headline/"
+                    "ar-AA1junk?ocid=BingNewsVerp"
+                ),
+                "snippet": "MSN BingNewsVerp wrapper.",
+            },
+        ]
+        news = prepare_web_results(rows, "top world news headlines", 8, kind="news")
+        news_urls = [item["url"] for item in news]
+        self.assertEqual(news_urls, ["https://www.reuters.com/world/top-news-today/"])
+
+        web = prepare_web_results(rows, "jagran josh school assembly", 8, kind="web")
+        web_urls = [item["url"] for item in web]
+        self.assertTrue(any("jagranjosh.com" in url for url in web_urls))
+        self.assertTrue(any("reuters.com" in url for url in web_urls))
+
+    def test_bing_news_apiclick_unwraps_to_bbc(self):
+        wrapped = (
+            "https://www.bing.com/news/apiclick.aspx?"
+            "url=https%3A%2F%2Fwww.bbc.com%2Fnews%2Fworld-123"
+        )
+        self.assertEqual(
+            unwrap_redirect_url(wrapped),
+            "https://www.bbc.com/news/world-123",
+        )
+        self.assertEqual(
+            usable_result_url(wrapped),
+            "https://www.bbc.com/news/world-123",
+        )
+
     def test_ranked_response_puts_python_org_ahead_of_blogs_and_ads(self):
         rows = parse_bing_serp(_html("bing_mixed_python.html"))
         resp = search_response_from_parsed(
