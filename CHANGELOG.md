@@ -3,8 +3,8 @@
 ## 1.0.14 - 2026-08-26
 ### Changed
 - Host-owned `web_search(kind=web|news|images)`: the runtime fetches and parses
-  results, retries another engine on an empty SERP, and never asks the model to
-  open a search page.
+  results, drops ads/tracking URLs, retries another engine on an empty, ads-only,
+  or thin SERP, and never asks the model to open a search page.
 - Web photo-send attaches the best image URL itself (`metadata.image` +
   attachments). `send_media` stays for Discord/WhatsApp file share.
 - Collapsed overlapping search and browser tools into `web_search` plus
@@ -18,6 +18,9 @@
 ### Fixed
 - `generate_image` no longer sends `response_format` to OpenAI `gpt-image-*`
   models (LiteLLM `UnsupportedParamsError` on `openai/gpt-image-2`).
+- Host search drops Bing/Google `aclk`, DoubleClick, Google Ads, and leftover
+  click-wrappers, unwraps Bing organic `ck/a` destinations, and prefers official
+  hosts such as python.org for software version queries.
 
 ## 1.0.13 - 2026-08-23
 ### Added

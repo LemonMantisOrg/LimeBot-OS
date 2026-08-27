@@ -17,6 +17,7 @@ from urllib.parse import quote_plus
 
 from core.search_parser import (
     parse_search_html,
+    prepare_web_results,
     usable_image_url as parser_usable_image_url,
     usable_result_url,
 )
@@ -24,6 +25,7 @@ from core.search_parser import (
 
 DEFAULT_COUNT = 8
 MAX_COUNT = 20
+MIN_ORGANIC_WEB = 3
 
 usable_image_url = parser_usable_image_url
 
@@ -190,24 +192,17 @@ def search_response_from_parsed(
             resp.error = "no image results"
         return resp
 
-    for item in rows:
-        if not isinstance(item, dict):
-            continue
-        url = usable_result_url(item.get("url"))
-        if not url:
-            continue
+    for item in prepare_web_results(rows, query, limit):
         resp.results.append(
             SearchResult(
-                title=str(item.get("title") or url),
-                url=url,
+                title=str(item.get("title") or item.get("url") or ""),
+                url=str(item.get("url") or ""),
                 snippet=str(item.get("snippet") or ""),
                 source="host",
             )
         )
-        if len(resp.results) >= limit:
-            break
     if not resp.results:
-        resp.error = "no search results"
+        resp.error = "no organic results"
     return resp
 
 
@@ -241,13 +236,46 @@ def search_response_from_browser(
     return resp
 
 
+def _web_results_sufficient(resp: SearchResponse, kind: str, count: int) -> bool:
+    if kind == "images":
+        return bool(resp.images)
+    needed = min(MIN_ORGANIC_WEB, max(1, count))
+    return len(resp.results) >= needed
+
+
+def _merge_web_results(
+    existing: List[SearchResult], incoming: List[SearchResult], query: str, limit: int
+) -> List[SearchResult]:
+    rows = [
+        {"title": item.title, "url": item.url, "snippet": item.snippet}
+        for item in existing + incoming
+        if item.url
+    ]
+    merged = prepare_web_results(rows, query, limit)
+    return [
+        SearchResult(
+            title=str(item.get("title") or ""),
+            url=str(item.get("url") or ""),
+            snippet=str(item.get("snippet") or ""),
+            source="host",
+        )
+        for item in merged
+    ]
+
+
 async def run_host_search(
     query: str,
     kind: str = "web",
     count: int = DEFAULT_COUNT,
     fetch_html: FetchHtml | None = None,
 ) -> SearchResponse:
-    """Fetch + parse + retry. ``fetch_html`` is injected (Playwright or tests)."""
+    """Fetch + parse + retry. ``fetch_html`` is injected (Playwright or tests).
+
+    Empty SERPs, ads-only SERPs, and thin organic parses (fewer than
+    ``MIN_ORGANIC_WEB`` web/news hits) trigger the next internal engine.
+    Organic hits already found are kept and merged. The model is never told
+    to open a search page.
+    """
     query = str(query or "").strip()
     kind = _normalize_kind(kind)
     resp = SearchResponse(kind=kind, query=query, provider="host")
@@ -259,6 +287,7 @@ async def run_host_search(
         return resp
 
     last_error = ""
+    accumulated: List[SearchResult] = []
     for engine in search_urls(query, kind):
         try:
             html = await fetch_html(engine.url, scroll=engine.scroll)
@@ -275,11 +304,28 @@ async def run_host_search(
         candidate = search_response_from_parsed(
             parsed, query=query, kind=kind, count=count, provider="host"
         )
-        if candidate.ok:
-            return candidate
-        last_error = candidate.error or f"{engine.name} returned no results"
+        if kind == "images":
+            if candidate.ok:
+                return candidate
+            last_error = candidate.error or f"{engine.name} returned no results"
+            continue
+        if candidate.results:
+            accumulated = _merge_web_results(
+                accumulated, candidate.results, query, _clamp_count(count)
+            )
+        if _web_results_sufficient(
+            SearchResponse(kind=kind, query=query, results=list(accumulated)),
+            kind,
+            count,
+        ):
+            resp.results = accumulated
+            return resp
+        last_error = candidate.error or f"{engine.name} returned no organic results"
 
-    resp.error = last_error or "no search results"
+    if accumulated:
+        resp.results = accumulated
+        return resp
+    resp.error = last_error or "no organic results"
     return resp
 
 
