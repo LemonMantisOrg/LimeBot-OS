@@ -715,12 +715,12 @@ export function ConfigPage() {
                                     Web Intelligence
                                 </CardTitle>
                                 <CardDescription>
-                                    Search, news, images, and deep research run through the real Playwright browser — the same stack as the browser skill.
+                                    Live search is host-owned: one `web_search` tool for web, news, and images. Playwright may fetch the page internally; the model never drives a search engine.
                                 </CardDescription>
                             </CardHeader>
                             <CardContent className="space-y-3">
                                 <p className="text-sm text-muted-foreground">
-                                    Install the browser once from the LimeBot folder. After that, web_search and image_search work without a separate search API key.
+                                    Install the browser once from the LimeBot folder. After that, `web_search` works without a separate search API key.
                                 </p>
                                 <p className="text-[11px] font-mono text-muted-foreground break-all">
                                     npm run lime-bot setup -- --recommended

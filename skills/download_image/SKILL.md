@@ -12,7 +12,7 @@ dependencies:
 # Image Downloader (Honey Badger Edition) 🖼️
 Use this skill only when a **direct image URL or page URL is already known** and native `send_media` cannot fetch it (strict CDN, HTML interstitial, wrong Content-Type).
 
-For ordinary chat requests such as "download a picture of X and send it in this chat", do **not** use this skill. Call native `image_search` then `send_media(path=<Image URL>)` instead. Do not use `run_command` or markdown image links for that path.
+For ordinary chat requests such as "download a picture of X and send it in this chat", do **not** use this skill. Call native `web_search(query=..., kind="images")` once and stop — the host attaches the photo. Do not use `run_command`, `send_media`, or markdown image links for that path.
 
 ### 🛡️ Robust Features:
 1.  **Byte Sniffing**: Ignores `Content-Type` headers (often `binary/octet-stream`) and checks the file signature (magic numbers) to detect JPEGs, PNGs, GIFs, and WEBPs.

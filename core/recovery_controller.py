@@ -11,7 +11,6 @@ from typing import Any, Dict, Iterable, List, Optional, Set
 
 DIAGNOSTIC_TOOLS = frozenset(
     {
-        "capability_search",
         "read_file",
         "list_dir",
         "search_files",
@@ -22,7 +21,6 @@ DIAGNOSTIC_TOOLS = frozenset(
 )
 RECOVERY_TOOLS = frozenset(
     {
-        "capability_search",
         "read_file",
         "list_dir",
         "search_files",
@@ -168,7 +166,7 @@ class RecoveryState:
         if self.failure_category == "invalid_arguments" and tool == self.failed_tool:
             inspected = bool(
                 set(self.inspected_tools)
-                & {"read_file", "inspect_skill", "capability_search"}
+                & {"read_file", "inspect_skill"}
             )
             if not inspected:
                 return "source_inspection_required: inspect the tool schema or source before retrying"

@@ -52,7 +52,7 @@ class TestDefaultToolSelectionRegressions(unittest.TestCase):
         )
 
         selected = agent._get_tool_definitions_for_turn(
-            "send this image",
+            "summarize the README and list remaining tasks",
             forced_skill_name="docx-creator",
         )
 

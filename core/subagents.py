@@ -29,7 +29,7 @@ CLAUDE_TOOL_ALIASES: Dict[str, str] = {
     "bash": "run_command",
     "task": "spawn_agent",
     "websearch": "web_search",
-    "webfetch": "browser_get_page_text",
+    "webfetch": "browser_extract",
 }
 
 SUBAGENT_SETTINGS_FILE = Path("data") / "subagents.json"
@@ -132,8 +132,8 @@ BUILTIN_SUBAGENTS: List[Dict[str, Any]] = [
         ),
         "prompt": (
             "You are LimeBot's internet research specialist.\n\n"
-            "Investigate the question using web_search and deep_research, then read "
-            "the most promising sources with browser_navigate / browser_get_page_text "
+            "Investigate the question using web_search, then read "
+            "the most promising sources with browser_navigate / browser_extract "
             "when you need full page content. Cross-check claims across sources and "
             "prefer primary/authoritative ones. Return a concise answer with inline "
             "[n] citations and a numbered sources list (title + URL). If evidence is "
@@ -141,11 +141,8 @@ BUILTIN_SUBAGENTS: List[Dict[str, Any]] = [
         ),
         "tools": [
             "web_search",
-            "image_search",
-            "deep_research",
             "browser_navigate",
             "browser_extract",
-            "browser_get_page_text",
             "read_file",
             "search_files",
         ],

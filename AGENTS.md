@@ -154,7 +154,6 @@ Sandboxed OS interface. All methods check `_is_path_allowed()` before touching t
 
 | Tool | Requires confirmation | Description |
 |------|-----------------------|-------------|
-| `capability_search(query, include_disabled)` | No | Resolve native tools, skills, MCP servers/tools, and subagents against a redacted capability snapshot; use before claiming an integration is unavailable |
 | `read_file(path, include_hash)` | No | Read file contents (20k char limit); optionally return the raw-file SHA-256 for stale-edit protection |
 | `edit_file(path, edits, expected_sha256)` | **Yes** | Apply exact, preflighted, atomic UTF-8 text edits with hash/anchor/no-op guards and a bounded diff. If the intended text is already on disk after a crash resume, returns `already_applied` instead of failing the job. |
 | `write_file(path, content)` | **Yes** | Create or overwrite a file |
@@ -167,10 +166,8 @@ Sandboxed OS interface. All methods check `_is_path_allowed()` before touching t
 | `calculate(expression)` | No | Safely evaluate bounded arithmetic for prices, totals, percentages, and conversions |
 | `memory_search(query)` | No | Search durable Markdown memory, using vectors when available |
 | `memory_save(content, scope)` | No | Persist an explicit fact/event to the Markdown journal or long-term memory |
-| `web_search(query, count, kind)` | No | Hybrid live web/news search via the provider chain (see below) |
-| `image_search(query, count)` | No | Image search returning image URLs + source pages |
-| `deep_research(query, depth)` | No | Multi-source research: searches, reads top pages, returns a cited synthesis |
-| `send_media(path, caption)` | No | Share a local file **or remote http(s) URL** into the current web/Discord/WhatsApp chat; duplicate delivery of the same path within one turn is blocked |
+| `web_search(query, count, kind)` | No | Host-owned live search. `kind` is `web`, `news`, or `images`. The host fetches and parses results (Playwright internally); the model never drives a search engine |
+| `send_media(path, caption)` | No | Share a local file **or remote http(s) URL** into Discord/WhatsApp (and leftover file-share paths). Web chat photos use host attach after `web_search(kind="images")` instead |
 | `send_voice(text, channel)` | No | Synthesize `text` with ElevenLabs and send it as a voice message — an mp3 file on Discord/WhatsApp, an inline playable clip on web. Requires `ELEVENLABS_API_KEY`. |
 | `generate_image(prompt, model, size, quality, count, reference_images, use_attached_images)` | No | Generate a new image or transform up to four allowed local/current-chat reference images. Explicit prompts saying not to generate an image fail closed before provider use. Current images and reference-style follow-ups can reuse the session's most recent image for 30 minutes; missing references fail closed instead of silently becoming text-only generation. Image generation has no outer LimeBot tool deadline, while individual provider requests retain transport timeouts. |
 | `send_discord_message(message, channel_id, user_id)` | No | Send a Discord message to a server channel or user DM |
@@ -181,6 +178,9 @@ Sandboxed OS interface. All methods check `_is_path_allowed()` before touching t
 | `cron_remove(job_id)` | **Yes** | Cancel a scheduled job |
 | `spawn_agent(task, isolation)` | No | Delegate a long, parallelizable, or specialist-matched task; `auto` isolates coding/review work, `copy` always captures changes in a temporary workspace, and `none` explicitly shares the live workspace |
 | `analyze_video(source, question, detail, start, end, max_frames, resolution)` | No | Analyze an allowed local video or public HTTP(S) video and return a transcript plus up to three contact sheets. |
+| `browser_navigate(url)` | No | Open a specific webpage. Always registered (the browser skill is not required). Named URLs and open/visit/go-to requests use this, not `web_search` |
+| `browser_act(action, ...)` | No | Snapshot, click, type, scroll, wait, press, back, tabs, switch_tab, or download on the current page. Always registered with `browser_navigate` |
+| `browser_extract(mode, selector)` | No | Read visible page text or list media. Do not use this to search. Always registered with `browser_navigate` |
 
 ### `core/video/` — Native Video Analysis
 
@@ -217,30 +217,24 @@ explicit parent-side action.
 
 | Tool | Limit |
 |------|-------|
-| `capability_search` | 4,000 chars |
 | `read_file` | 8,000 chars |
 | `edit_file` | 8,000 chars |
 | `verify_files` | 6,000 chars |
 | `diagnose_files` | 8,000 chars |
 | `spawn_agent` | 12,000 chars |
 | `browser_extract` | 5,000 chars |
-| `browser_get_page_text` | 5,000 chars |
 | `memory_search` | 3,000 chars |
-| `browser_snapshot` | 3,000 chars |
-| `deep_research` | 8,000 chars |
+| `browser_act` | 3,000 chars |
 | `web_search` | 6,000 chars |
-| `image_search` | 2,500 chars |
-| `google_search` | 2,000 chars |
 | `run_command` | 2,000 chars |
-| `browser_list_media` | 1,000 chars |
 | `list_dir` | 500 chars |
 | Everything else | 2,000 chars |
 
-**Web search (`core/web_search.py`)** — `web_search` / `image_search` / `deep_research` drive the real Playwright browser. Web and news use Google result pages; images use Bing Images with a Google Images fallback so the tool can return original **Image URL** fields for `send_media(path='<url>')`. There is no Tavily / Brave Search API / SerpAPI / DuckDuckGo i.js provider chain. If Playwright is missing, search fails with `BROWSER_INSTALL_HINT` (`npm run lime-bot feature install browser && npm run install-browser`). Search tools stay registered so media delivery can still route `image_search` then `send_media`. `deep_research` reads the top browser results via `fetch_readable_text` and synthesizes a cited answer via the configured chat model.
+**Web search (`core/web_search.py`)** — one model-facing tool: `web_search(kind=web|news|images)`. The host fetches SERP HTML (Playwright internally), parses organic cards, drops ads and tracking URLs (`aclk`, DoubleClick, Google Ads, leftover click-wrappers), unwraps Bing organic `ck/a` and news `apiclick` destinations, ranks official hosts for software version queries, and retries another engine when a layout is empty, ads-only, or thinner than three organic hits. For `kind=news`, school-assembly / exam-prep / Yahoo / Mashable / “catching our eye” roundups and leftover MSN BingNewsVerp chrome are dropped; world desks (Reuters, AP, BBC, AFP, NYT, Washington Post, The Guardian, Al Jazeera, FT, WSJ, Bloomberg, NPR, DW, France 24) are ranked first, and the host retries until at least three world-desk hits are merged. Python “What’s New” / docs queries prefer `docs.python.org` and drop WhatsApp leftovers. Live FX queries drop history URLs, JS-only Xe shells, and default-pair junk (calculator.net EUR/USD 1.366 when the query is USD/GTQ); they require both query currencies on the card, parse a numeric GTQ-per-USD rate from HTML/snippets (retrying another source when the first page is an empty SPA or the wrong pair), and tell the model to compute Q1000 / rate rather than refuse or reuse another pair. Engine names and browser clicks are not model tools. There is no Tavily / Brave Search API / SerpAPI / DuckDuckGo i.js provider chain. If Playwright is missing, search fails with `BROWSER_INSTALL_HINT` (`npm run lime-bot feature install browser && npm run install-browser`). Empty results tell the model to answer from what it knows — never to open a search engine. A named page URL is `browser_navigate`, not search; `browser_navigate` / `browser_act` / `browser_extract` stay registered even when the browser skill is off. `browser_extract` returns compact HTML table rows first so Active Python Releases survive truncation.
 
-**Chat photo delivery:** "download/send me a picture of X in this chat" is `image_search` then `send_media(path=<Image URL>)`. That is not `generate_image`, `spawn_agent`, `capability_search`, or `run_command`. Live chat media fetch is not a filesystem write and does not need confirmation.
+**Chat photo delivery:** "download/send me a picture of X in this chat" is `web_search(kind="images")`. The host downloads the best image URL and stamps `metadata.image` + `attachments` on the web outbound message. That is not `generate_image`, `spawn_agent`, `send_media`, or `run_command`. Live chat media fetch is not a filesystem write and does not need confirmation. Discord/WhatsApp may still use `send_media` for file share.
 
-**Remote media delivery** — `send_media` accepts a remote http(s) URL, downloads it to `temp/downloads/` through an SSRF-guarded fetch (`fetch_url_to_temp`: only public IPs, http(s) only, per-hop redirect validation, 15MB cap), then delivers it. On the web channel it emits the standard `metadata.image` + `attachments` envelope; on Discord/WhatsApp it sends the file. This is the intended path for "send me a pic": `image_search` → `send_media(path='<Image URL>')`.
+**Remote media delivery** — `send_media` accepts a remote http(s) URL, downloads it to `temp/downloads/` through an SSRF-guarded fetch (`fetch_url_to_temp`: only public IPs, http(s) only, per-hop redirect validation, 15MB cap), then delivers it. On the web channel it emits the standard `metadata.image` + `attachments` envelope; on Discord/WhatsApp it sends the file. Web photo-send turns do not register `send_media`; the host attach path uses the same envelope internally.
 
 **Voice delivery** — there are two independent paths:
 - **On demand** via the `send_voice(text, channel)` tool. The model calls it when the user asks for a voice message; it synthesizes with `ElevenLabsTTS.synthesize_to_file()` and publishes an mp3 as a `type:"file"` message (Discord/WhatsApp, `cleanup_file:True`) or a `voice_url` message (web). This works regardless of the auto-TTS channel toggles.

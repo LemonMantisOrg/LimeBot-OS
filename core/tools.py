@@ -426,8 +426,8 @@ class Toolbox:
             except Exception as e:
                 logger.warning(f"Failed to read subagent registry: {e}")
 
-        # Search tools always stay registered; missing Playwright fails at
-        # execution with BROWSER_INSTALL_HINT rather than hiding the tools.
+        # Search and browser tools always stay registered; missing Playwright
+        # fails at execution with BROWSER_INSTALL_HINT rather than hiding them.
         tools = build_tool_definitions(
             enabled_skills,
             available_agents=available_agents,
@@ -2793,7 +2793,7 @@ class Toolbox:
 
         Works for web, Discord, and WhatsApp. Remote URLs are downloaded into
         temp/downloads first (SSRF-guarded), then delivered as a local file, so
-        the agent can act on image URLs found via image_search / web_search.
+        the agent can act on image URLs found via web_search.
         """
         from core.context import tool_context
         from core.events import OutboundMessage
@@ -2874,6 +2874,14 @@ class Toolbox:
             self._remember_sent_media(turn_id, media_fingerprint)
         display_path = self._to_display_path(resolved)
         return f"Sent '{display_path}' to the current {channel} chat."
+
+    async def attach_chat_image(self, image_url: str, caption: str = "") -> str:
+        """Host-owned download + stamp of an existing photo into the current chat.
+
+        Used after web_search(kind='images') on a media-delivery turn. Not a
+        model-facing tool.
+        """
+        return await self.send_media(image_url, caption)
 
     def _remember_sent_media(self, turn_id: str, fingerprint: str) -> None:
         """Remember successful media deliveries without growing forever."""
@@ -3339,7 +3347,12 @@ class Toolbox:
         if quality and quality != "auto":
             kwargs["quality"] = quality
         if not model.startswith(("gemini/", "google/")):
-            kwargs["response_format"] = "b64_json"
+            bare = str(model or "").split("/", 1)[-1]
+            if not (
+                bare.startswith("gpt-image-")
+                or bare == "chatgpt-image-latest"
+            ):
+                kwargs["response_format"] = "b64_json"
 
         response = await aimage_generation(**kwargs)
         data = getattr(response, "data", None)

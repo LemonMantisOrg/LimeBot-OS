@@ -68,8 +68,8 @@ class TestToolSelection(unittest.TestCase):
         names = {tool["function"]["name"] for tool in shortlisted}
 
         self.assertIn("browser_navigate", names)
-        self.assertIn("browser_snapshot", names)
-        self.assertIn("browser_click", names)
+        self.assertIn("browser_act", names)
+        self.assertNotIn("browser_click", names)
         self.assertNotIn("read_file", names)
 
     def test_spanish_browser_export_workflow_keeps_complete_tool_chain(self):
@@ -88,9 +88,8 @@ class TestToolSelection(unittest.TestCase):
         self.assertTrue(
             {
                 "browser_navigate",
-                "browser_snapshot",
-                "browser_click",
-                "browser_download",
+                "browser_act",
+                "browser_extract",
                 "run_command",
                 "list_dir",
                 "read_file",
@@ -242,8 +241,7 @@ class TestToolSelection(unittest.TestCase):
         all_tools = [
             {"function": {"name": "read_file"}},
             {"function": {"name": "browser_navigate"}},
-            {"function": {"name": "browser_snapshot"}},
-            {"function": {"name": "browser_click"}},
+            {"function": {"name": "browser_act"}},
             {"function": {"name": "list_dir"}},
         ]
         agent._get_tool_definitions = lambda: all_tools
@@ -308,8 +306,7 @@ class TestToolSelection(unittest.TestCase):
         agent._get_tool_definitions = lambda: [
             {"function": {"name": "read_file"}},
             {"function": {"name": "browser_navigate"}},
-            {"function": {"name": "browser_snapshot"}},
-            {"function": {"name": "browser_click"}},
+            {"function": {"name": "browser_act"}},
             {"function": {"name": "list_dir"}},
         ]
         agent._log_tool_debug = lambda *args, **kwargs: None
@@ -360,30 +357,38 @@ class TestToolSelection(unittest.TestCase):
             "delete temp/output.json": {"delete_file"},
             "run pytest for the tests": {"run_command"},
             "open https://example.com then click and type into the form": {
-                "browser_navigate", "browser_click", "browser_type"
+                "browser_navigate", "browser_act"
             },
             "search the web for current Python news": {"web_search"},
-            "find an image of a lime": {"image_search", "send_media"},
-            "deep research this topic with sources": {"deep_research"},
+            "find an image of a lime": {"web_search"},
+            "deep research this topic with sources": {"web_search"},
             "recall what I told you yesterday": {"memory_search"},
             "remind me tomorrow at noon": {"cron_add"},
             "send a Discord DM": {"send_discord_message"},
-            "send this photo as an attachment": {"send_media"},
+            "send this photo as an attachment": {"web_search"},
             "send a voice note": {"send_voice"},
             "generate an image of a lime": {"generate_image"},
             "download a picture of rose of blackpink for me and send me that in this chat": {
-                "image_search",
-                "send_media",
+                "web_search",
             },
             "delegate this to a subagent": {"spawn_agent"},
         }
+        exclusive_prompts = {
+            "find an image of a lime",
+            "send this photo as an attachment",
+            "generate an image of a lime",
+            "download a picture of rose of blackpink for me and send me that in this chat",
+        }
         for prompt, required in cases.items():
             with self.subTest(prompt=prompt):
-                selected = shortlist_tool_definitions(tools, prompt)
+                selected = shortlist_tool_definitions(tools, prompt, channel="web")
                 names = {tool["function"]["name"] for tool in selected}
                 self.assertTrue(required <= names, (required, names))
                 self.assertLessEqual(len(selected), 12)
-                self.assertLess(len(json.dumps(selected)), len(json.dumps(tools)))
+                if prompt in exclusive_prompts:
+                    self.assertEqual(names, required)
+                else:
+                    self.assertLess(len(json.dumps(selected)), len(json.dumps(tools)))
 
         ambiguous = "help me with this"
         self.assertEqual(shortlist_tool_definitions(tools, ambiguous), tools)
@@ -403,3 +408,185 @@ class TestToolSelection(unittest.TestCase):
             {"read_file", "list_dir", "run_command", "send_media"} <= names
         )
         self.assertLessEqual(len(shortlisted), 12)
+
+
+OPEN_PYTHON_PAGE = (
+    "Open https://www.python.org/downloads/ in the browser and tell me "
+    "the latest Python 3 release number shown on that page. Don't guess from memory."
+)
+
+
+class TestNamedUrlKeepsBrowserTools(unittest.TestCase):
+    def _unavailable_claims(self, blob: str) -> list[str]:
+        lowered = blob.lower()
+        hits = []
+        for phrase in (
+            "cannot open pages",
+            "can't open pages",
+            "cannot open the browser",
+            "can't open the browser",
+            "browser is unavailable",
+            "browser is not available",
+            "browser tools are unavailable",
+        ):
+            if phrase in lowered:
+                hits.append(phrase)
+        return hits
+
+    def test_browser_tools_register_without_browser_skill(self):
+        from core.tool_defs import build_tool_definitions
+
+        names = {
+            tool["function"]["name"]
+            for tool in build_tool_definitions(enabled_skills=[])
+        }
+        self.assertTrue(
+            {"browser_navigate", "browser_act", "browser_extract"} <= names
+        )
+
+    def test_open_https_url_in_browser_exposes_navigate(self):
+        from core.tool_defs import build_tool_definitions, shortlist_tool_definitions
+
+        tools = build_tool_definitions(enabled_skills=[])
+        selected = shortlist_tool_definitions(tools, OPEN_PYTHON_PAGE, channel="web")
+        names = {tool["function"]["name"] for tool in selected}
+        self.assertIn("browser_navigate", names)
+        self.assertIn("browser_act", names)
+        self.assertIn("browser_extract", names)
+        blob = "\n".join(
+            str(tool["function"].get("description") or "") for tool in selected
+        )
+        self.assertEqual(self._unavailable_claims(blob), [])
+        self.assertIn("you can open pages", blob.lower())
+
+    def test_search_turn_with_named_url_still_keeps_browser_tools(self):
+        from core.tool_defs import build_tool_definitions, shortlist_tool_definitions
+
+        tools = build_tool_definitions(enabled_skills=[])
+        prompt = (
+            "Search the web for current Python news and open "
+            "https://www.python.org/downloads/ in the browser"
+        )
+        selected = shortlist_tool_definitions(tools, prompt, channel="web")
+        names = {tool["function"]["name"] for tool in selected}
+        self.assertIn("web_search", names)
+        self.assertIn("browser_navigate", names)
+        self.assertIn("browser_act", names)
+        self.assertIn("browser_extract", names)
+
+    def test_photo_and_generate_exclusive_shortlists_stay_exclusive(self):
+        from core.tool_defs import build_tool_definitions, shortlist_tool_definitions
+
+        tools = build_tool_definitions(enabled_skills=[])
+        photo = shortlist_tool_definitions(
+            tools,
+            "download a picture of rose of blackpink for me and send me that in this chat",
+            channel="web",
+        )
+        generate = shortlist_tool_definitions(
+            tools, "generate an image of a lime robot", channel="web"
+        )
+        self.assertEqual(
+            {tool["function"]["name"] for tool in photo}, {"web_search"}
+        )
+        self.assertEqual(
+            {tool["function"]["name"] for tool in generate}, {"generate_image"}
+        )
+
+    def test_stable_prompt_does_not_claim_browser_unavailable(self):
+        from core.prompt import build_stable_system_prompt
+
+        prompt = build_stable_system_prompt(
+            sender_id="owner",
+            channel="web",
+            chat_id="chat",
+            model="test-model",
+            allowed_paths=[],
+            skill_registry=None,
+            config=SimpleNamespace(
+                llm=SimpleNamespace(enable_dynamic_personality=False),
+                personality_whitelist=["owner"],
+            ),
+            soul=(
+                "Core values matter. Truth, boundaries, and personality are important. "
+                "This soul description is long enough to pass validation and explain who I am."
+            ),
+            identity_raw=(
+                "# IDENTITY.md - Who I Am\n\n"
+                "*   **Name:** LimeBot\n"
+                "*   **Emoji:** 🍋\n"
+                "*   **Style:** Clear and direct\n"
+            ),
+            sender_name="Owner",
+        )
+        self.assertIn("browser_navigate", prompt)
+        self.assertIn("You can open pages", prompt)
+        self.assertIn("write_file", prompt)
+        self.assertIn("run_command", prompt)
+        self.assertIn("3.14.7 not 3.14.0", prompt)
+        self.assertIn("quote the first sentence", prompt)
+        self.assertEqual(self._unavailable_claims(prompt), [])
+
+    def test_agent_loop_keeps_browser_tools_with_or_without_shortlist(self):
+        from core.loop import AgentLoop
+        from core.tool_defs import build_tool_definitions
+
+        all_tools = build_tool_definitions(enabled_skills=[])
+        for enabled in (True, False):
+            with self.subTest(tool_shortlist_enabled=enabled):
+                agent = object.__new__(AgentLoop)
+                agent.config = SimpleNamespace(tool_shortlist_enabled=enabled)
+                agent.skill_registry = SimpleNamespace(
+                    get_required_tool_names=lambda _name: []
+                )
+                agent._get_tool_definitions = lambda: all_tools
+                agent._log_tool_debug = lambda *args, **kwargs: None
+                selected = agent._get_tool_definitions_for_turn(
+                    OPEN_PYTHON_PAGE, session_key="web:dash"
+                )
+                names = {tool["function"]["name"] for tool in selected}
+                self.assertIn("browser_navigate", names)
+                self.assertIn("browser_act", names)
+                self.assertIn("browser_extract", names)
+                self.assertNotEqual(names, {"web_search"})
+
+
+WRITE_AND_RUN = (
+    "Look up statistics.fmean docs, write a tiny script, run it on "
+    "[7.75, 7.80, 7.85], and paste the output."
+)
+
+
+class TestWriteAndRunKeepsCodeTools(unittest.TestCase):
+    def test_write_script_and_run_exposes_write_file_and_run_command(self):
+        from core.tool_defs import build_tool_definitions, shortlist_tool_definitions
+
+        tools = build_tool_definitions(enabled_skills=[])
+        selected = shortlist_tool_definitions(tools, WRITE_AND_RUN, channel="web")
+        names = {tool["function"]["name"] for tool in selected}
+        self.assertIn("write_file", names)
+        self.assertIn("run_command", names)
+        self.assertIn("web_search", names)
+        self.assertNotEqual(names, {"web_search"})
+
+    def test_write_and_run_is_not_search_exclusive(self):
+        from core.media_intent import exclusive_tools_for_turn
+
+        self.assertIsNone(exclusive_tools_for_turn(WRITE_AND_RUN, channel="web"))
+
+    def test_photo_and_generate_exclusive_shortlists_still_exclusive(self):
+        from core.tool_defs import build_tool_definitions, shortlist_tool_definitions
+
+        tools = build_tool_definitions(enabled_skills=[])
+        photo = shortlist_tool_definitions(
+            tools,
+            "download a picture of rose of blackpink for me and send me that in this chat",
+            channel="web",
+        )
+        generate = shortlist_tool_definitions(
+            tools, "generate an image of a lime robot", channel="web"
+        )
+        self.assertEqual({tool["function"]["name"] for tool in photo}, {"web_search"})
+        self.assertEqual(
+            {tool["function"]["name"] for tool in generate}, {"generate_image"}
+        )

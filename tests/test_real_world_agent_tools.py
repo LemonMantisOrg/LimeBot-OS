@@ -104,7 +104,7 @@ class TestAgentCompletionReserve(unittest.TestCase):
         definitions = [
             {"function": {"name": "web_search"}},
             {"function": {"name": "browser_navigate"}},
-            {"function": {"name": "browser_download"}},
+            {"function": {"name": "browser_act"}},
             {"function": {"name": "create_spreadsheet"}},
             {"function": {"name": "calculate"}},
             {"function": {"name": "send_media"}},

@@ -418,6 +418,47 @@ class TestToolsBasic(unittest.IsolatedAsyncioTestCase):
         self.assertIn("openai/gpt-image-2", candidates)
         self.assertNotIn("openai/gpt-image-1", candidates)
 
+    async def test_gpt_image_2_omits_unsupported_response_format(self):
+        import sys
+        import types
+        from unittest.mock import AsyncMock
+
+        from core.bus import MessageBus
+        from core.tools import Toolbox
+
+        toolbox = Toolbox(
+            allowed_paths=[str(Path.cwd())],
+            bus=MessageBus(),
+            config=SimpleNamespace(skills=SimpleNamespace(enabled=[])),
+        )
+        fake = SimpleNamespace(data=[])
+        mocked = AsyncMock(return_value=fake)
+        fake_litellm = types.ModuleType("litellm")
+        fake_litellm.aimage_generation = mocked
+        with patch.dict(sys.modules, {"litellm": fake_litellm}):
+            await toolbox._generate_litellm_image(
+                "a lime",
+                "openai/gpt-image-2",
+                1,
+                "1024x1024",
+                "auto",
+            )
+
+        kwargs = mocked.await_args.kwargs
+        self.assertNotIn("response_format", kwargs)
+        self.assertEqual(kwargs["model"], "gpt-image-2")
+
+        mocked.reset_mock()
+        with patch.dict(sys.modules, {"litellm": fake_litellm}):
+            await toolbox._generate_litellm_image(
+                "a lime",
+                "dall-e-3",
+                1,
+                "1024x1024",
+                "auto",
+            )
+        self.assertEqual(mocked.await_args.kwargs.get("response_format"), "b64_json")
+
     async def test_generate_image_uses_current_chat_image_as_openai_reference(self):
         import json
 
