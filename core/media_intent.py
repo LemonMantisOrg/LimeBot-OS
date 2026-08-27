@@ -35,6 +35,16 @@ _CREATE_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+_WRITE_RUN_RE = re.compile(
+    r"(?:"
+    r"\bwrite\b.{0,100}\b(?:script|program|code|\.py)\b"
+    r"|\b(?:save|create)\b.{0,60}\b(?:script|\.py)\b"
+    r"|\brun\b.{0,80}\b(?:script|it|the code|python|the program)\b"
+    r"|\bpaste (?:the )?output\b"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
+
 # Model-facing tools for a photo-send turn. Host attaches the bytes.
 CHAT_MEDIA_TOOLS: Tuple[str, ...] = ("web_search",)
 CHAT_MEDIA_SUPPORTING_TOOLS: Tuple[str, ...] = ()
@@ -72,6 +82,11 @@ MEDIA_DELIVERY_RULES = (
 )
 
 
+def is_write_and_run_request(text: str) -> bool:
+    """True when the user wants a script written and executed, not a paste."""
+    return bool(_WRITE_RUN_RE.search(text or ""))
+
+
 def is_image_generation_request(text: str) -> bool:
     """True when the user wants a newly created/transformed picture."""
     return bool(_CREATE_RE.search(text or ""))
@@ -99,6 +114,8 @@ def exclusive_tools_for_turn(
     """Return an exclusive model-facing tool set for photo/generate turns."""
     blob = str(text or "").strip()
     if not blob:
+        return None
+    if is_write_and_run_request(blob):
         return None
     generation = is_image_generation_request(blob)
     delivery = is_chat_media_delivery(blob)

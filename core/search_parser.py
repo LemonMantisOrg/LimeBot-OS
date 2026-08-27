@@ -106,8 +106,8 @@ _RELEASE_PATH_MARKERS = (
     "/news/release",
 )
 
-# World desks ranked first for kind=news.
-_NEWS_PREFERRED_HOSTS = (
+# World desks ranked first for kind=news. Retry until at least three of these hit.
+_NEWS_WORLD_DESKS = (
     "reuters.com",
     "apnews.com",
     "ap.org",
@@ -118,23 +118,28 @@ _NEWS_PREFERRED_HOSTS = (
     "washingtonpost.com",
     "theguardian.com",
     "aljazeera.com",
-    "npr.org",
     "ft.com",
     "wsj.com",
-    "economist.com",
+    "bloomberg.com",
+    "npr.org",
     "dw.com",
     "france24.com",
-    "abc.net.au",
-    "thehindu.com",
-    "cnn.com",
-    "cbsnews.com",
-    "nbcnews.com",
 )
 
-# School-assembly, exam-prep, and aggregator-of-aggregators hosts.
+# Optional regional desks: keep and rank, but do not count toward the retry floor.
+_NEWS_REGIONAL_DESKS = (
+    "thehindu.com",
+    "abc.net.au",
+)
+
+# School-assembly, exam-prep, lifestyle aggregators, and leftover chrome.
 _NEWS_JUNK_HOSTS = (
     "jagranjosh.com",
     "abplive.com",
+    "yahoo.com",
+    "mashable.com",
+    "buzzfeed.com",
+    "buzzfeednews.com",
     "byjus.com",
     "vedantu.com",
     "unacademy.com",
@@ -176,6 +181,45 @@ _NEWS_JUNK_TEXT = (
     "gk quiz",
     "gk today",
     "daily current affairs",
+    "catching our eye",
+    "caught our eye",
+    "catch our eye",
+    "news roundup",
+    "headlines roundup",
+    "stories roundup",
+    "daily roundup",
+    "weekly roundup",
+    "morning roundup",
+)
+
+_FX_PREFERRED_HOSTS = (
+    "xe.com",
+    "oanda.com",
+    "investing.com",
+    "bloomberg.com",
+    "reuters.com",
+    "ft.com",
+    "wsj.com",
+    "open.er-api.com",
+    "exchangerate.host",
+    "frankfurter.app",
+)
+
+_FX_HISTORY_MARKERS = (
+    "/history",
+    "/historical",
+    "historical-rate",
+    "historical_rate",
+    "history-of",
+    "/hist/",
+)
+
+_FX_HISTORY_TEXT = (
+    "historical exchange",
+    "exchange rate history",
+    "history of the",
+    "historical rates",
+    "rates in 20",
 )
 
 
@@ -376,15 +420,101 @@ def official_result_boost(query: str, url: str) -> int:
     return score
 
 
+def is_python_docs_query(query: str) -> bool:
+    q = " ".join(str(query or "").lower().split())
+    if "python" not in q:
+        return False
+    if any(marker in q for marker in ("what's new", "whats new", "whatsnew", "documentation")):
+        return True
+    if re.search(r"\b3\.\d{1,2}\b", q) and any(
+        marker in q for marker in ("new", "feature", "docs", "library", "whats")
+    ):
+        return True
+    return False
+
+
+def python_docs_boost(query: str, url: str) -> int:
+    if not is_python_docs_query(query):
+        return 0
+    host = _normalized_host(url)
+    path = (urlparse(url).path or "").lower()
+    if host in {"whatsapp.com", "wa.me"} or host.endswith(".whatsapp.com"):
+        return -200
+    if host in {"wikipedia.org"} or host.endswith(".wikipedia.org"):
+        return -60
+    if host == "docs.python.org" or host.endswith(".docs.python.org"):
+        score = 120
+        if "/whatsnew" in path:
+            score += 40
+        version = re.search(r"\b3\.\d{1,2}\b", str(query or ""))
+        if version and version.group(0) in path:
+            score += 20
+        return score
+    if host == "python.org" or host.endswith(".python.org"):
+        return 50
+    return 0
+
+
+def is_official_python_docs_url(url: str) -> bool:
+    host = _normalized_host(url)
+    path = (urlparse(url).path or "").lower()
+    if host == "docs.python.org" or host.endswith(".docs.python.org"):
+        return True
+    if (host == "python.org" or host.endswith(".python.org")) and "/whatsnew" in path:
+        return True
+    return False
+
+
+def is_fx_query(query: str) -> bool:
+    q = str(query or "").lower()
+    if re.search(r"\b(?:usd|eur|gbp|jpy|gtq|mxn|cad|fx|forex)\b", q):
+        return True
+    return bool(re.search(r"exchange\s+rate|currency|convert\b.{0,40}\b(?:to|from)\b", q))
+
+
+def is_fx_history_result(url: str, title: str = "", snippet: str = "") -> bool:
+    lowered = f"{url} {title} {snippet}".lower()
+    path = (urlparse(url).path or "").lower()
+    if any(marker in path or marker in lowered for marker in _FX_HISTORY_MARKERS):
+        return True
+    if any(marker in lowered for marker in _FX_HISTORY_TEXT):
+        return True
+    if re.search(r"/20(0\d|1\d)(/|$)", path):
+        return True
+    return False
+
+
+def fx_result_boost(query: str, url: str, title: str = "", snippet: str = "") -> int:
+    if not is_fx_query(query):
+        return 0
+    if is_fx_history_result(url, title, snippet):
+        return -200
+    host = _normalized_host(url)
+    path = (urlparse(url).path or "").lower()
+    score = 0
+    if _host_in(host, _FX_PREFERRED_HOSTS):
+        score += 90
+    if any(marker in path for marker in ("/converter", "/convert", "/live", "usd-", "-usd", "gtq")):
+        score += 30
+    return score
+
+
+def is_world_news_desk(url: str) -> bool:
+    return _host_in(_normalized_host(url), _NEWS_WORLD_DESKS)
+
+
 def news_result_boost(url: str) -> int:
     """World desks outrank leftover aggregators for kind=news."""
-    if _host_in(_normalized_host(url), _NEWS_PREFERRED_HOSTS):
+    host = _normalized_host(url)
+    if _host_in(host, _NEWS_WORLD_DESKS):
         return 100
+    if _host_in(host, _NEWS_REGIONAL_DESKS):
+        return 40
     return 0
 
 
 def is_news_junk_result(url: str, title: str = "", snippet: str = "") -> bool:
-    """Drop school-assembly, exam-prep, and leftover MSN/Bing click chrome."""
+    """Drop school-assembly, exam-prep, Yahoo/Mashable roundups, and MSN chrome."""
     host = _normalized_host(url)
     if _host_in(host, _NEWS_JUNK_HOSTS) or _host_in(host, _NEWS_WRAPPER_HOSTS):
         return True
@@ -393,7 +523,36 @@ def is_news_junk_result(url: str, title: str = "", snippet: str = "") -> bool:
         return True
     if "bingnewservp" in blob or "apiclick.aspx" in blob:
         return True
+    title_l = str(title or "").lower()
+    if "roundup" in title_l and not is_world_news_desk(url):
+        return True
     return False
+
+
+def should_drop_web_result(
+    query: str, url: str, title: str = "", snippet: str = "", kind: str = "web"
+) -> bool:
+    kind = str(kind or "web").strip().lower()
+    if kind == "news":
+        return is_news_junk_result(url, title, snippet)
+    if is_fx_query(query) and is_fx_history_result(url, title, snippet):
+        return True
+    if is_python_docs_query(query):
+        host = _normalized_host(url)
+        if host in {"whatsapp.com"} or host.endswith(".whatsapp.com"):
+            return True
+    return False
+
+
+def query_result_boost(
+    query: str, url: str, title: str = "", snippet: str = "", kind: str = "web"
+) -> int:
+    score = official_result_boost(query, url)
+    if str(kind or "web").strip().lower() == "news":
+        score += news_result_boost(url)
+    score += python_docs_boost(query, url)
+    score += fx_result_boost(query, url, title, snippet)
+    return score
 
 
 def _dedupe(rows: Iterable[Dict[str, Any]], key: str) -> List[Dict[str, Any]]:
@@ -424,13 +583,15 @@ def dedupe_web_results(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def rank_web_results(
     rows: List[Dict[str, Any]], query: str, kind: str = "web"
 ) -> List[Dict[str, Any]]:
-    news = str(kind or "web").strip().lower() == "news"
-
     def _key(item: tuple[int, Dict[str, Any]]) -> tuple:
         idx, row = item
         url = str(row.get("url") or "")
-        news_boost = news_result_boost(url) if news else 0
-        return (-news_boost, -official_result_boost(query, url), idx)
+        title = str(row.get("title") or "")
+        snippet = str(row.get("snippet") or "")
+        return (
+            -query_result_boost(query, url, title, snippet, kind),
+            idx,
+        )
 
     indexed = list(enumerate(rows))
     indexed.sort(key=_key)
@@ -440,7 +601,6 @@ def rank_web_results(
 def prepare_web_results(
     rows: Iterable[Dict[str, Any]], query: str, limit: int, kind: str = "web"
 ) -> List[Dict[str, Any]]:
-    news = str(kind or "web").strip().lower() == "news"
     cleaned: List[Dict[str, Any]] = []
     for item in rows or []:
         if not isinstance(item, dict):
@@ -450,7 +610,7 @@ def prepare_web_results(
             continue
         title = str(item.get("title") or url)
         snippet = str(item.get("snippet") or "")[:600]
-        if news and is_news_junk_result(url, title, snippet):
+        if should_drop_web_result(query, url, title, snippet, kind=kind):
             continue
         cleaned.append({"title": title, "url": url, "snippet": snippet})
     cleaned = rank_web_results(dedupe_web_results(cleaned), query, kind=kind)

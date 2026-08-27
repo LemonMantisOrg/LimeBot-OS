@@ -521,6 +521,10 @@ class TestNamedUrlKeepsBrowserTools(unittest.TestCase):
         )
         self.assertIn("browser_navigate", prompt)
         self.assertIn("You can open pages", prompt)
+        self.assertIn("write_file", prompt)
+        self.assertIn("run_command", prompt)
+        self.assertIn("3.14.7 not 3.14.0", prompt)
+        self.assertIn("quote the first sentence", prompt)
         self.assertEqual(self._unavailable_claims(prompt), [])
 
     def test_agent_loop_keeps_browser_tools_with_or_without_shortlist(self):
@@ -545,3 +549,44 @@ class TestNamedUrlKeepsBrowserTools(unittest.TestCase):
                 self.assertIn("browser_act", names)
                 self.assertIn("browser_extract", names)
                 self.assertNotEqual(names, {"web_search"})
+
+
+WRITE_AND_RUN = (
+    "Look up statistics.fmean docs, write a tiny script, run it on "
+    "[7.75, 7.80, 7.85], and paste the output."
+)
+
+
+class TestWriteAndRunKeepsCodeTools(unittest.TestCase):
+    def test_write_script_and_run_exposes_write_file_and_run_command(self):
+        from core.tool_defs import build_tool_definitions, shortlist_tool_definitions
+
+        tools = build_tool_definitions(enabled_skills=[])
+        selected = shortlist_tool_definitions(tools, WRITE_AND_RUN, channel="web")
+        names = {tool["function"]["name"] for tool in selected}
+        self.assertIn("write_file", names)
+        self.assertIn("run_command", names)
+        self.assertIn("web_search", names)
+        self.assertNotEqual(names, {"web_search"})
+
+    def test_write_and_run_is_not_search_exclusive(self):
+        from core.media_intent import exclusive_tools_for_turn
+
+        self.assertIsNone(exclusive_tools_for_turn(WRITE_AND_RUN, channel="web"))
+
+    def test_photo_and_generate_exclusive_shortlists_still_exclusive(self):
+        from core.tool_defs import build_tool_definitions, shortlist_tool_definitions
+
+        tools = build_tool_definitions(enabled_skills=[])
+        photo = shortlist_tool_definitions(
+            tools,
+            "download a picture of rose of blackpink for me and send me that in this chat",
+            channel="web",
+        )
+        generate = shortlist_tool_definitions(
+            tools, "generate an image of a lime robot", channel="web"
+        )
+        self.assertEqual({tool["function"]["name"] for tool in photo}, {"web_search"})
+        self.assertEqual(
+            {tool["function"]["name"] for tool in generate}, {"generate_image"}
+        )

@@ -24,6 +24,7 @@ from core.media_intent import (
     exclusive_tools_for_turn,
     is_chat_media_delivery,
     is_image_generation_request,
+    is_write_and_run_request,
 )
 
 
@@ -867,7 +868,9 @@ BROWSER_TOOLS = [
         "name": "browser_extract",
         "description": (
             "Read visible content from the current page. mode='text' returns page or "
-            "selector text; mode='media' lists images on the page. Do not use this to search."
+            "selector text with HTML tables as compact rows first (so Active Python "
+            "Releases and similar tables are not truncated). mode='media' lists images "
+            "on the page. Do not use this to search."
         ),
         "params": {
             "mode": {
@@ -1306,6 +1309,9 @@ def shortlist_tool_definitions(
     tokens = _tokenize(text)
     selected_families = set()
     media_delivery = is_chat_media_delivery(text) and not is_image_generation_request(text)
+    write_and_run = is_write_and_run_request(text)
+    if write_and_run:
+        media_delivery = False
 
     for family, hints in _FAMILY_HINTS.items():
         if tokens & hints:
@@ -1341,8 +1347,24 @@ def shortlist_tool_definitions(
     ):
         selected_families.discard("spreadsheet")
 
+    if write_and_run:
+        selected_families.update({"filesystem", "command", "search"})
     if user_named_a_page(text):
         selected_families.add("browser")
+    if tokens & {"news", "headline", "headlines", "article", "lede"}:
+        selected_families.add("browser")
+    if any(
+        marker in lowered
+        for marker in (
+            "exchange rate",
+            "usd/",
+            "gtq",
+            "forex",
+            "convert q",
+            "convert $",
+        )
+    ) or (tokens & {"usd", "eur", "gbp", "fx"} and tokens & {"convert", "rate", "live"}):
+        selected_families.update({"search", "calculation"})
     artifact_tokens = {
         "download", "downloaded", "export", "exported", "spreadsheet", "excel",
         "xlsx", "csv", "screenshot", "capture", "attach", "descarga", "descargar",
@@ -1381,6 +1403,9 @@ def shortlist_tool_definitions(
         "implementar",
     }:
         mandatory.add("edit_file")
+    if write_and_run:
+        mandatory.add("write_file")
+        mandatory.add("run_command")
     if "browser" in selected_families and tokens & artifact_tokens:
         mandatory.add("browser_act")
 

@@ -44,6 +44,33 @@ class TestFormatting(unittest.TestCase):
         self.assertIn("already attached", attached)
         self.assertIn("Do not call send_media", attached)
 
+    def test_news_results_ask_for_world_desk_lede_quote(self):
+        from core.web_search import SearchResponse, SearchResult, format_search_response
+
+        resp = SearchResponse(kind="news", query="top world headlines", provider="host")
+        resp.results = [
+            SearchResult(title="World", url="https://www.reuters.com/world/", snippet="Desk")
+        ]
+        out = format_search_response(resp)
+        self.assertIn("browser_navigate", out)
+        self.assertIn("first sentence", out)
+        self.assertIn("world-desk", out.lower())
+
+    def test_fx_results_forbid_history_and_refusal(self):
+        from core.web_search import SearchResponse, SearchResult, format_search_response
+
+        resp = SearchResponse(
+            kind="web", query="live USD/GTQ exchange rate convert Q1000", provider="host"
+        )
+        resp.results = [
+            SearchResult(title="XE", url="https://www.xe.com/currencyconverter/", snippet="Live")
+        ]
+        out = format_search_response(resp)
+        self.assertIn("current-rate", out)
+        self.assertIn("history", out)
+        self.assertIn("Do not refuse", out)
+        self.assertIn("calculate", out)
+
 
 class TestImageUrlFilter(unittest.TestCase):
     def test_keeps_public_originals(self):

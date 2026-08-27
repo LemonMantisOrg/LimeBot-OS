@@ -144,21 +144,20 @@ class TestNewsQualityRanking(unittest.TestCase):
         self.assertFalse(any("msn.com" in url for url in ranked))
         self.assertFalse(any("BingNewsVerp" in url for url in ranked))
 
+    def test_yahoo_mashable_roundups_dropped_reuters_bbc_kept(self):
+        rows = parse_bing_serp(_html("bing_news_roundups.html"))
         resp = search_response_from_parsed(
             rows, query="top world news headlines", kind="news", count=8
         )
-        self.assertTrue(resp.ok)
         ranked = [item.url for item in resp.results]
         self.assertIn("https://www.reuters.com/world/top-news-today/", ranked)
         self.assertIn("https://www.bbc.com/news/world-123", ranked)
+        self.assertFalse(any("yahoo.com" in url for url in ranked))
+        self.assertFalse(any("mashable.com" in url for url in ranked))
         self.assertTrue(
             ranked[0].startswith("https://www.reuters.com/")
             or ranked[0].startswith("https://www.bbc.com/")
         )
-        self.assertFalse(any("jagranjosh.com" in url for url in ranked))
-        self.assertFalse(any("abplive.com" in url for url in ranked))
-        self.assertFalse(any("msn.com" in url for url in ranked))
-        self.assertFalse(any("BingNewsVerp" in url for url in ranked))
 
     def test_prepare_web_results_drops_school_assembly_only_for_news(self):
         from core.search_parser import prepare_web_results
@@ -205,6 +204,27 @@ class TestNewsQualityRanking(unittest.TestCase):
             usable_result_url(wrapped),
             "https://www.bbc.com/news/world-123",
         )
+
+    def test_whats_new_python_prefers_docs_over_whatsapp_wikipedia(self):
+        rows = parse_bing_serp(_html("bing_python_whatsnew.html"))
+        resp = search_response_from_parsed(
+            rows, query="What's New in Python 3.14", kind="web", count=8
+        )
+        self.assertTrue(resp.ok)
+        urls = [item.url for item in resp.results]
+        self.assertTrue(urls[0].startswith("https://docs.python.org/3/whatsnew/3.14"))
+        self.assertFalse(any("whatsapp.com" in url for url in urls))
+
+    def test_live_fx_drops_history_and_keeps_current_rate_page(self):
+        rows = parse_bing_serp(_html("bing_fx_mixed.html"))
+        resp = search_response_from_parsed(
+            rows, query="live USD/GTQ exchange rate", kind="web", count=8
+        )
+        self.assertTrue(resp.ok)
+        urls = [item.url for item in resp.results]
+        self.assertTrue(any("xe.com" in url for url in urls))
+        self.assertFalse(any("exchange-rates.org" in url for url in urls))
+        self.assertFalse(any("/history" in url for url in urls))
 
     def test_ranked_response_puts_python_org_ahead_of_blogs_and_ads(self):
         rows = parse_bing_serp(_html("bing_mixed_python.html"))
@@ -275,6 +295,29 @@ class TestHostSearchRetry(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(urls[0].startswith("https://www.python.org/"))
         self.assertFalse(any("aclk" in url for url in urls))
         self.assertFalse(any("doubleclick" in url for url in urls))
+        self.assertGreaterEqual(len(fetched), 2)
+
+    async def test_news_roundups_retry_until_world_desks(self):
+        from core.search_parser import is_world_news_desk
+
+        fetched = []
+
+        async def fetch_html(url: str, scroll: bool = False) -> str:
+            fetched.append(url)
+            if "google.com" in url:
+                return _html("google_news_roundups.html")
+            if "bing.com" in url:
+                return _html("bing_news_desks.html")
+            return ""
+
+        resp = await run_host_search(
+            "top world news headlines", kind="news", count=8, fetch_html=fetch_html
+        )
+        urls = [item.url for item in resp.results]
+        self.assertTrue(resp.ok)
+        self.assertFalse(any("yahoo.com" in url for url in urls))
+        self.assertFalse(any("mashable.com" in url for url in urls))
+        self.assertGreaterEqual(sum(1 for url in urls if is_world_news_desk(url)), 3)
         self.assertGreaterEqual(len(fetched), 2)
 
     async def test_ads_only_everywhere_fails_without_browser_instruction(self):

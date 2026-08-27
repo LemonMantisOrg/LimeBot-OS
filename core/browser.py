@@ -36,6 +36,57 @@ BROWSER_INSTALL_HINT = (
     " (or: npm run lime-bot feature install browser && npm run install-browser)."
 )
 
+
+def compact_html_tables(html: str, max_chars: int = 1500) -> str:
+    """Turn HTML tables into compact pipe rows so release tables survive truncation."""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html or "", "html.parser")
+    blocks: List[str] = []
+    for table in soup.find_all("table"):
+        rows: List[str] = []
+        for tr in table.find_all("tr"):
+            cells: List[str] = []
+            for cell in tr.find_all(["th", "td"]):
+                text = re.sub(r"\s+", " ", cell.get_text(" ", strip=True)).strip()
+                link = cell.find("a")
+                href = str((link.get("href") if link else "") or "")
+                slug = href.rstrip("/").split("/")[-1] if href else ""
+                if slug and slug.lower() not in text.lower().replace(" ", ""):
+                    text = f"{text} {slug}".strip() if text else slug
+                if text:
+                    cells.append(text)
+            if cells:
+                rows.append(" | ".join(cells))
+        if len(rows) >= 2:
+            blocks.append("\n".join(rows))
+    joined = "\n\n".join(blocks)
+    if len(joined) > max_chars:
+        return joined[:max_chars].rstrip() + "…"
+    return joined
+
+
+def merge_extract_text(body: str, tables: str, limit: int) -> tuple[str, bool]:
+    """Put compact tables first so Active Python Releases survive the char cap."""
+    body = str(body or "")
+    tables = str(tables or "").strip()
+    if limit <= 0:
+        return body, False
+    if not tables:
+        truncated = len(body) > limit
+        text = body[:limit] + (f"\n... (truncated at {limit} chars)" if truncated else "")
+        return text, truncated
+    table_budget = min(len(tables), max(400, limit // 3), limit)
+    table_part = tables[:table_budget]
+    prefix = "Active tables:\n" + table_part
+    rest_budget = max(0, limit - len(prefix) - 2)
+    truncated = len(tables) > table_budget or len(body) > rest_budget
+    body_part = body[:rest_budget]
+    text = prefix + "\n\n" + body_part if body_part else prefix
+    if truncated:
+        text = text[:limit] + f"\n... (truncated at {limit} chars)"
+    return text, truncated
+
 # Bing Images stores original URLs in the `m` JSON attribute on result tiles.
 _BING_IMAGE_EXTRACT_JS = """
 () => {
@@ -1316,11 +1367,11 @@ class BrowserManager:
                         "error": f"Selector '{selector}' not found in any frame",
                     }
 
-                text = await elem.inner_text()
-                original_length = len(text)
-                truncated = original_length > limit
-                if truncated:
-                    text = text[:limit] + f"\n... (truncated at {limit} chars)"
+                html = await elem.inner_html()
+                tables = compact_html_tables(html, max_chars=min(1500, max(400, limit // 3)))
+                body = await elem.inner_text()
+                original_length = len(body) + len(tables)
+                text, truncated = merge_extract_text(body, tables, limit)
 
                 return {
                     "success": True,

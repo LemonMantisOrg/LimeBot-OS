@@ -16,6 +16,10 @@ from typing import Any, Awaitable, Callable, List, Sequence
 from urllib.parse import quote_plus
 
 from core.search_parser import (
+    is_fx_query,
+    is_official_python_docs_url,
+    is_python_docs_query,
+    is_world_news_desk,
     parse_search_html,
     prepare_web_results,
     usable_image_url as parser_usable_image_url,
@@ -26,6 +30,7 @@ from core.search_parser import (
 DEFAULT_COUNT = 8
 MAX_COUNT = 20
 MIN_ORGANIC_WEB = 3
+MIN_WORLD_DESK_NEWS = 3
 
 usable_image_url = parser_usable_image_url
 
@@ -236,10 +241,24 @@ def search_response_from_browser(
     return resp
 
 
-def _web_results_sufficient(resp: SearchResponse, kind: str, count: int) -> bool:
+def _world_desk_count(results: List[SearchResult]) -> int:
+    return sum(1 for item in results if is_world_news_desk(item.url))
+
+
+def _web_results_sufficient(
+    resp: SearchResponse, kind: str, count: int, query: str = ""
+) -> bool:
     if kind == "images":
         return bool(resp.images)
     needed = min(MIN_ORGANIC_WEB, max(1, count))
+    if kind == "news":
+        return _world_desk_count(resp.results) >= min(MIN_WORLD_DESK_NEWS, max(1, count))
+    if is_fx_query(query):
+        from core.search_parser import fx_result_boost
+
+        return any(fx_result_boost(query, item.url) > 0 for item in resp.results)
+    if is_python_docs_query(query):
+        return any(is_official_python_docs_url(item.url) for item in resp.results)
     return len(resp.results) >= needed
 
 
@@ -276,7 +295,9 @@ async def run_host_search(
     """Fetch + parse + retry. ``fetch_html`` is injected (Playwright or tests).
 
     Empty SERPs, ads-only SERPs, and thin organic parses (fewer than
-    ``MIN_ORGANIC_WEB`` web/news hits) trigger the next internal engine.
+    ``MIN_ORGANIC_WEB`` web hits, or fewer than ``MIN_WORLD_DESK_NEWS``
+    world-desk news hits) trigger the next internal engine. Python docs and
+    live FX queries also retry until an official/current-rate page appears.
     Organic hits already found are kept and merged. The model is never told
     to open a search page.
     """
@@ -321,6 +342,7 @@ async def run_host_search(
             SearchResponse(kind=kind, query=query, results=list(accumulated)),
             kind,
             count,
+            query=query,
         ):
             resp.results = accumulated
             return resp
@@ -376,4 +398,19 @@ def format_search_response(resp: SearchResponse) -> str:
             meta = f"({r.published}) {meta}".strip()
         if meta:
             lines.append(f"   {meta}")
+    if resp.kind == "news":
+        lines.append("")
+        lines.append(
+            "Prefer a world-desk article URL (Reuters, AP, BBC, AFP, NYT, "
+            "Washington Post, Guardian, Al Jazeera, FT, WSJ, Bloomberg, NPR, DW, "
+            "France 24). browser_navigate that article then browser_extract and "
+            "quote the first sentence; do not paraphrase the lede."
+        )
+    elif is_fx_query(resp.query):
+        lines.append("")
+        lines.append(
+            "Use a current-rate page, not a history URL. Compute the conversion "
+            "with calculate. Cite the source URL and the page timestamp. "
+            "Do not refuse a live rate."
+        )
     return "\n".join(lines)
