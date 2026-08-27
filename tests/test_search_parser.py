@@ -215,16 +215,31 @@ class TestNewsQualityRanking(unittest.TestCase):
         self.assertTrue(urls[0].startswith("https://docs.python.org/3/whatsnew/3.14"))
         self.assertFalse(any("whatsapp.com" in url for url in urls))
 
-    def test_live_fx_drops_history_and_keeps_current_rate_page(self):
+    def test_live_fx_drops_history_and_keeps_html_rate_page(self):
         rows = parse_bing_serp(_html("bing_fx_mixed.html"))
         resp = search_response_from_parsed(
             rows, query="live USD/GTQ exchange rate", kind="web", count=8
         )
         self.assertTrue(resp.ok)
         urls = [item.url for item in resp.results]
-        self.assertTrue(any("xe.com" in url for url in urls))
+        self.assertTrue(any("exchanging.com" in url for url in urls))
+        self.assertTrue(urls[0].startswith("https://www.exchanging.com/"))
         self.assertFalse(any("exchange-rates.org" in url for url in urls))
+        self.assertFalse(any("xe.com" in url for url in urls))
         self.assertFalse(any("/history" in url for url in urls))
+        self.assertIn("7.63", resp.results[0].snippet)
+        self.assertIn("7.63", resp.answer)
+
+    def test_empty_xe_spa_html_has_no_rate_html_rate_is_kept(self):
+        from core.search_parser import fx_rate_from_html
+
+        self.assertIsNone(
+            fx_rate_from_html(_html("xe_spa.html"), "live USD GTQ rate")
+        )
+        self.assertEqual(
+            fx_rate_from_html(_html("fx_rate_html.html"), "live USD GTQ rate"),
+            7.63,
+        )
 
     def test_ranked_response_puts_python_org_ahead_of_blogs_and_ads(self):
         rows = parse_bing_serp(_html("bing_mixed_python.html"))
@@ -319,6 +334,61 @@ class TestHostSearchRetry(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any("mashable.com" in url for url in urls))
         self.assertGreaterEqual(sum(1 for url in urls if is_world_news_desk(url)), 3)
         self.assertGreaterEqual(len(fetched), 2)
+
+    async def test_fx_empty_spa_retries_html_rate_source(self):
+        fetched = []
+
+        async def fetch_html(url: str, scroll: bool = False) -> str:
+            fetched.append(url)
+            if "google.com" in url:
+                return _html("google_fx_xe.html")
+            if "xe.com" in url:
+                return _html("xe_spa.html")
+            if "bing.com" in url:
+                return _html("bing_fx_oanda.html")
+            if "oanda.com" in url:
+                return _html("fx_rate_html.html")
+            return ""
+
+        resp = await run_host_search(
+            "live USD/GTQ exchange rate convert Q1000",
+            kind="web",
+            count=8,
+            fetch_html=fetch_html,
+        )
+        self.assertTrue(resp.ok)
+        self.assertIn("7.63", resp.answer)
+        self.assertTrue(any("oanda.com" in item.url for item in resp.results))
+        self.assertFalse(any("xe.com" in item.url for item in resp.results))
+        self.assertGreaterEqual(len(fetched), 2)
+        self.assertTrue(any("google.com" in url for url in fetched))
+        self.assertTrue(any("bing.com" in url for url in fetched))
+        self.assertFalse(any("xe.com" in url for url in fetched))
+
+    async def test_fx_html_page_fills_rate_when_snippet_has_no_number(self):
+        fetched = []
+
+        async def fetch_html(url: str, scroll: bool = False) -> str:
+            fetched.append(url)
+            if "google.com" in url:
+                return _html("google_fx_oanda_no_rate.html")
+            if "oanda.com" in url:
+                return _html("fx_rate_html.html")
+            if "bing.com" in url:
+                return _html("bing_fx_oanda.html")
+            return ""
+
+        resp = await run_host_search(
+            "live USD GTQ rate",
+            kind="web",
+            count=8,
+            fetch_html=fetch_html,
+        )
+        self.assertTrue(resp.ok)
+        self.assertIn("7.63", resp.answer)
+        self.assertTrue(any("oanda.com" in item.url for item in resp.results))
+        self.assertTrue(any("oanda.com" in url for url in fetched))
+        self.assertIn("7.63", resp.results[0].snippet)
 
     async def test_ads_only_everywhere_fails_without_browser_instruction(self):
         async def fetch_html(url: str, scroll: bool = False) -> str:

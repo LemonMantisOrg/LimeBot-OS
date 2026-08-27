@@ -13,10 +13,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, List, Sequence
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
 from core.search_parser import (
+    fx_rate_from_html,
+    fx_rate_from_text,
     is_fx_query,
+    is_fx_spa_host,
     is_official_python_docs_url,
     is_python_docs_query,
     is_world_news_desk,
@@ -31,6 +34,7 @@ DEFAULT_COUNT = 8
 MAX_COUNT = 20
 MIN_ORGANIC_WEB = 3
 MIN_WORLD_DESK_NEWS = 3
+MAX_FX_PAGE_FETCHES = 3
 
 usable_image_url = parser_usable_image_url
 
@@ -208,6 +212,8 @@ def search_response_from_parsed(
         )
     if not resp.results:
         resp.error = "no organic results"
+        return resp
+    _attach_fx_answer(resp)
     return resp
 
 
@@ -245,6 +251,90 @@ def _world_desk_count(results: List[SearchResult]) -> int:
     return sum(1 for item in results if is_world_news_desk(item.url))
 
 
+def _fx_rate_from_result(query: str, item: SearchResult) -> float | None:
+    return fx_rate_from_text(
+        f"{item.title} {item.snippet} {item.content}", query
+    )
+
+
+def _attach_fx_answer(resp: SearchResponse) -> None:
+    if not is_fx_query(resp.query):
+        return
+    for item in resp.results:
+        rate = _fx_rate_from_result(resp.query, item)
+        if rate is None:
+            continue
+        resp.answer = (
+            f"Live rate ≈ {rate} from {item.url}. "
+            f"Compute Q1000 / {rate} with calculate when converting quetzales. "
+            "Cite this URL and a timestamp. Never refuse a live rate."
+        )
+        return
+
+
+def _fx_destination_fetchable(url: str) -> bool:
+    raw = str(url or "")
+    if not raw.startswith(("http://", "https://")):
+        return False
+    host = (urlparse(raw).netloc or "").lower()
+    if "google." in host or "bing.com" in host or "duckduckgo.com" in host:
+        return False
+    return True
+
+
+async def _hydrate_fx_rates(
+    results: List[SearchResult],
+    query: str,
+    fetch_html: FetchHtml | None,
+) -> List[SearchResult]:
+    """Fill live rates from snippets, or by fetching HTML that actually has a number."""
+    if not is_fx_query(query):
+        return results
+    hydrated: List[SearchResult] = []
+    fetches = 0
+    found_rate = any(_fx_rate_from_result(query, item) is not None for item in results)
+    for item in results:
+        rate = _fx_rate_from_result(query, item)
+        snippet = item.snippet
+        content = item.content
+        if (
+            rate is None
+            and not found_rate
+            and fetch_html is not None
+            and fetches < MAX_FX_PAGE_FETCHES
+            and _fx_destination_fetchable(item.url)
+            and not is_fx_spa_host(item.url)
+        ):
+            fetches += 1
+            try:
+                html = await fetch_html(item.url)
+            except TypeError:
+                try:
+                    html = await fetch_html(item.url, scroll=False)
+                except Exception:
+                    html = ""
+            except Exception:
+                html = ""
+            rate = fx_rate_from_html(html or "", query)
+            if rate is not None:
+                found_rate = True
+        if rate is not None:
+            content = str(rate)
+            if "live rate" not in snippet.lower():
+                snippet = f"Live rate ≈ {rate}. {snippet}".strip()
+        hydrated.append(
+            SearchResult(
+                title=item.title,
+                url=item.url,
+                snippet=snippet,
+                content=content,
+                published=item.published,
+                source=item.source or "host",
+            )
+        )
+    return hydrated
+
+
 def _web_results_sufficient(
     resp: SearchResponse, kind: str, count: int, query: str = ""
 ) -> bool:
@@ -254,9 +344,7 @@ def _web_results_sufficient(
     if kind == "news":
         return _world_desk_count(resp.results) >= min(MIN_WORLD_DESK_NEWS, max(1, count))
     if is_fx_query(query):
-        from core.search_parser import fx_result_boost
-
-        return any(fx_result_boost(query, item.url) > 0 for item in resp.results)
+        return any(_fx_rate_from_result(query, item) is not None for item in resp.results)
     if is_python_docs_query(query):
         return any(is_official_python_docs_url(item.url) for item in resp.results)
     return len(resp.results) >= needed
@@ -335,6 +423,10 @@ async def run_host_search(
             last_error = candidate.error or f"{engine.name} returned no results"
             continue
         if candidate.results:
+            if is_fx_query(query):
+                candidate.results = await _hydrate_fx_rates(
+                    list(candidate.results), query, fetch_html
+                )
             accumulated = _merge_web_results(
                 accumulated, candidate.results, query, _clamp_count(count), kind=kind
             )
@@ -345,11 +437,13 @@ async def run_host_search(
             query=query,
         ):
             resp.results = accumulated
+            _attach_fx_answer(resp)
             return resp
         last_error = candidate.error or f"{engine.name} returned no organic results"
 
     if accumulated:
         resp.results = accumulated
+        _attach_fx_answer(resp)
         return resp
     resp.error = last_error or "no organic results"
     return resp
@@ -408,9 +502,17 @@ def format_search_response(resp: SearchResponse) -> str:
         )
     elif is_fx_query(resp.query):
         lines.append("")
-        lines.append(
-            "Use a current-rate page, not a history URL. Compute the conversion "
-            "with calculate. Cite the source URL and the page timestamp. "
-            "Do not refuse a live rate."
-        )
+        if resp.answer:
+            lines.append(
+                "Use that live rate. CALL calculate for the conversion "
+                "(Q1000 / rate for quetzales to USD). Cite the source URL and timestamp. "
+                "Never refuse."
+            )
+        else:
+            lines.append(
+                "No numeric rate in these snippets yet. Retry web_search or open an HTML "
+                "current-rate page (oanda, x-rates, exchanging) — not a JS-only Xe shell "
+                "and not a history URL. CALL calculate once you have the rate. "
+                "Never refuse."
+            )
     return "\n".join(lines)

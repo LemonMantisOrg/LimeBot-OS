@@ -68,8 +68,31 @@ class TestFormatting(unittest.TestCase):
         out = format_search_response(resp)
         self.assertIn("current-rate", out)
         self.assertIn("history", out)
-        self.assertIn("Do not refuse", out)
+        self.assertIn("refuse", out.lower())
         self.assertIn("calculate", out)
+        self.assertNotIn("check Xe.com yourself", out)
+        self.assertNotIn("check the site themselves", out.lower())
+
+    def test_fx_snippet_rate_is_surfaced_as_direct_answer(self):
+        from core.web_search import search_response_from_parsed, format_search_response
+
+        resp = search_response_from_parsed(
+            [
+                {
+                    "title": "USD to GTQ",
+                    "url": "https://www.exchanging.com/usd-gtq",
+                    "snippet": "1 USD = 7.63 GTQ. Updated today.",
+                }
+            ],
+            query="live USD/GTQ convert Q1000",
+            kind="web",
+        )
+        self.assertTrue(resp.ok)
+        self.assertIn("7.63", resp.answer)
+        out = format_search_response(resp)
+        self.assertIn("7.63", out)
+        self.assertIn("Never refuse", out)
+        self.assertNotIn("check Xe.com yourself", out)
 
 
 class TestImageUrlFilter(unittest.TestCase):

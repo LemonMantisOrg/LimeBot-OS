@@ -1372,6 +1372,21 @@ class BrowserManager:
                 body = await elem.inner_text()
                 original_length = len(body) + len(tables)
                 text, truncated = merge_extract_text(body, tables, limit)
+                from core.search_parser import fx_empty_extract_note, fx_rate_from_text
+
+                page_url = str(getattr(page, "url", "") or "")
+                if fx_empty_extract_note(text, page_url) and fx_rate_from_text(text, page_url) is None:
+                    await asyncio.sleep(1.0)
+                    html = await elem.inner_html()
+                    tables = compact_html_tables(
+                        html, max_chars=min(1500, max(400, limit // 3))
+                    )
+                    body = await elem.inner_text()
+                    original_length = len(body) + len(tables)
+                    text, truncated = merge_extract_text(body, tables, limit)
+                note = fx_empty_extract_note(text, page_url)
+                if note:
+                    text = f"{text}\n\n{note}".strip()
 
                 return {
                     "success": True,

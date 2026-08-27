@@ -902,7 +902,9 @@ SEARCH_TOOLS = [
             "to find existing photos (the host attaches the best image on a send-photo "
             "request). Use kind='news' for recent news. If the user named a page URL or "
             "asked to open/visit/go to a page, call browser_navigate instead — you can "
-            "open pages. Do not open a search engine with browser tools. "
+            "open pages. For a live FX rate, this tool should return a numeric rate in "
+            "snippets; do not rely on a JS-only Xe converter. Do not open a search engine "
+            "with browser tools. "
             "Example: web_search(query='Rosé BLACKPINK', kind='images')."
         ),
         "params": {

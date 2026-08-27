@@ -193,8 +193,12 @@ _NEWS_JUNK_TEXT = (
 )
 
 _FX_PREFERRED_HOSTS = (
-    "xe.com",
     "oanda.com",
+    "x-rates.com",
+    "exchangerates.org.uk",
+    "exchanging.com",
+    "wise.com",
+    "ofx.com",
     "investing.com",
     "bloomberg.com",
     "reuters.com",
@@ -203,6 +207,11 @@ _FX_PREFERRED_HOSTS = (
     "open.er-api.com",
     "exchangerate.host",
     "frankfurter.app",
+)
+
+# JS-heavy converters whose first HTML snapshot is often an empty shell.
+_FX_SPA_HOSTS = (
+    "xe.com",
 )
 
 _FX_HISTORY_MARKERS = (
@@ -472,6 +481,66 @@ def is_fx_query(query: str) -> bool:
     return bool(re.search(r"exchange\s+rate|currency|convert\b.{0,40}\b(?:to|from)\b", q))
 
 
+def is_fx_spa_host(url: str) -> bool:
+    return _host_in(_normalized_host(url), _FX_SPA_HOSTS)
+
+
+def fx_rate_from_text(text: str, query: str = "") -> float | None:
+    """Return the first plausible live FX rate in visible text, or None.
+
+    Integers such as Q1000 and years are ignored. USD/GTQ prefers 6.5–9.5.
+    """
+    blob = str(text or "")
+    if not blob:
+        return None
+    matches = [
+        float(match.group(1))
+        for match in re.finditer(r"(?<![\d.])(\d{1,2}\.\d{2,6})(?![\d])", blob)
+    ]
+    if not matches:
+        return None
+    q = str(query or "").lower() + " " + blob.lower()
+    if re.search(r"\bgtq\b|quetzal", q):
+        gtq = [value for value in matches if 6.5 <= value <= 9.5]
+        if gtq:
+            return gtq[0]
+    for value in matches:
+        if 0.10 <= value <= 99.99:
+            return value
+    return None
+
+
+def fx_rate_from_html(html: str, query: str = "") -> float | None:
+    """Parse a visible FX rate from HTML, ignoring script/style SPA shells."""
+    soup = BeautifulSoup(html or "", "html.parser")
+    for node in soup(["script", "style", "noscript"]):
+        node.decompose()
+    return fx_rate_from_text(soup.get_text(" ", strip=True), query)
+
+
+def fx_empty_extract_note(text: str, url: str) -> str:
+    """Host hint when a converter extract has no numeric rate."""
+    host = _normalized_host(url)
+    path = (urlparse(str(url or "")).path or "").lower()
+    looks_like_fx = (
+        is_fx_spa_host(url)
+        or _host_in(host, _FX_PREFERRED_HOSTS)
+        or "currency" in path
+        or "converter" in path
+        or "exchange" in path
+        or is_fx_query(str(url or ""))
+    )
+    if not looks_like_fx:
+        return ""
+    if fx_rate_from_text(text, url) is not None:
+        return ""
+    return (
+        "No numeric FX rate in this snapshot (likely a JS shell). Do not refuse. "
+        "Call web_search for the pair and use a snippet rate, or browser_navigate a "
+        "different HTML current-rate page (oanda, x-rates, exchanging)."
+    )
+
+
 def is_fx_history_result(url: str, title: str = "", snippet: str = "") -> bool:
     lowered = f"{url} {title} {snippet}".lower()
     path = (urlparse(url).path or "").lower()
@@ -492,10 +561,14 @@ def fx_result_boost(query: str, url: str, title: str = "", snippet: str = "") ->
     host = _normalized_host(url)
     path = (urlparse(url).path or "").lower()
     score = 0
+    if is_fx_spa_host(url):
+        score -= 80
     if _host_in(host, _FX_PREFERRED_HOSTS):
         score += 90
+    if fx_rate_from_text(f"{title} {snippet}", query) is not None:
+        score += 80
     if any(marker in path for marker in ("/converter", "/convert", "/live", "usd-", "-usd", "gtq")):
-        score += 30
+        score += 20
     return score
 
 
@@ -612,8 +685,27 @@ def prepare_web_results(
         snippet = str(item.get("snippet") or "")[:600]
         if should_drop_web_result(query, url, title, snippet, kind=kind):
             continue
+        if is_fx_query(query):
+            rate = fx_rate_from_text(f"{title} {snippet}", query)
+            if rate is not None and "live rate" not in snippet.lower():
+                snippet = f"Live rate ≈ {rate}. {snippet}".strip()
         cleaned.append({"title": title, "url": url, "snippet": snippet})
     cleaned = rank_web_results(dedupe_web_results(cleaned), query, kind=kind)
+    if is_fx_query(query) and any(
+        fx_rate_from_text(f"{row['title']} {row['snippet']}", query) is not None
+        for row in cleaned
+    ):
+        cleaned = [
+            row
+            for row in cleaned
+            if not (
+                is_fx_spa_host(row["url"])
+                and fx_rate_from_text(
+                    f"{row['title']} {row['snippet']}", query
+                )
+                is None
+            )
+        ]
     if limit > 0:
         return cleaned[:limit]
     return cleaned

@@ -47,3 +47,25 @@ class TestBrowserExtractTables(unittest.TestCase):
         self.assertIn("python-31214", text)
         self.assertIn("3.12", text)
         self.assertTrue(text.startswith("Active tables:"))
+
+
+class TestFxExtractHint(unittest.TestCase):
+    def test_empty_converter_extract_tells_model_not_to_refuse(self):
+        from core.search_parser import fx_empty_extract_note, fx_rate_from_html
+
+        spa = (
+            Path(__file__).resolve().parent / "fixtures" / "search" / "xe_spa.html"
+        ).read_text(encoding="utf-8")
+        html_rate = (
+            Path(__file__).resolve().parent / "fixtures" / "search" / "fx_rate_html.html"
+        ).read_text(encoding="utf-8")
+        self.assertIsNone(fx_rate_from_html(spa, "USD GTQ"))
+        self.assertEqual(fx_rate_from_html(html_rate, "USD GTQ"), 7.63)
+        note = fx_empty_extract_note("Currency converter", "https://www.xe.com/currencyconverter/")
+        self.assertIn("Do not refuse", note)
+        self.assertIn("web_search", note)
+        self.assertNotIn("check the site themselves", note.lower())
+        self.assertEqual(
+            fx_empty_extract_note("1 USD = 7.63 GTQ", "https://www.xe.com/currencyconverter/"),
+            "",
+        )
