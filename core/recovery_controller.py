@@ -31,6 +31,8 @@ RECOVERY_TOOLS = frozenset(
         "edit_skill",
         "write_file",
         "run_command",
+        "run_steps",
+        "apply_workspace_changeset",
     }
 )
 
@@ -56,7 +58,20 @@ def classify_failure(tool: str, text: str) -> str:
         return "cancellation" if "cancel" in value else "timeout"
     if any(marker in value for marker in ("401", "403", "authentication", "unauthorized", "invalid api key", "credentials")):
         return "authentication"
-    if any(marker in value for marker in ("permission", "policy denied", "not allowed", "access denied")):
+    if any(
+        marker in value
+        for marker in (
+            "permission",
+            "policy denied",
+            "not allowed",
+            "access denied",
+            "forbidden character",
+            "chained shell commands",
+            "environment assignment",
+            "environment manipulation",
+            "command policy",
+        )
+    ):
         return "permission_policy"
     if any(marker in value for marker in ("429", "rate limit", "502", "503", "504", "overloaded", "connection reset", "temporarily unavailable")):
         return "transient_provider"

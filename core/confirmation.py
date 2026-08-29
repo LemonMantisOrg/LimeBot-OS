@@ -28,6 +28,8 @@ SENSITIVE_TOOLS = frozenset(
         "delete_file",
         "edit_file",
         "run_command",
+        "run_steps",
+        "apply_workspace_changeset",
         "write_file",
         "create_spreadsheet",
         "cron_remove",

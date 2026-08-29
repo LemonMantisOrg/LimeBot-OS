@@ -30,6 +30,8 @@ TOOL_RESULT_LIMITS: Dict[str, int] = {
     "browser_act": 3_000,
     "web_search": 6_000,
     "run_command": 2_000,
+    "run_steps": 4_000,
+    "apply_workspace_changeset": 8_000,
     "list_dir": 500,
     "generate_image": 2_000,
     "analyze_video": 30_000,
@@ -69,7 +71,7 @@ TAG_COMPAT_TOOLS = frozenset({
 TOOL_INTENT_RE = re.compile(
     r"\b("
     # Exact tool names
-    r"read_file|edit_file|write_file|delete_file|list_dir|search_files|verify_files|diagnose_files|run_command|memory_search|memory_save|"
+    r"read_file|edit_file|write_file|delete_file|list_dir|search_files|verify_files|diagnose_files|run_command|run_steps|apply_workspace_changeset|memory_search|memory_save|"
     r"cron_add|cron_list|cron_remove|spawn_agent|generate_image|send_media|send_voice|analyze_video|"
     r"web_search|"
     r"browser_navigate|browser_act|browser_extract|"

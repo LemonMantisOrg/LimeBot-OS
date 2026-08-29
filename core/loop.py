@@ -152,6 +152,7 @@ _MUTATION_TOOL_NAMES = frozenset(
         "delete_file",
         "create_skill",
         "edit_skill",
+        "apply_workspace_changeset",
     }
 )
 _RESEARCH_TOOL_NAMES = frozenset(
@@ -415,6 +416,8 @@ class AgentLoop:
             "verify_files": self.toolbox.verify_files,
             "diagnose_files": self.toolbox.diagnose_files,
             "run_command": self.toolbox.run_command,
+            "run_steps": self.toolbox.run_steps,
+            "apply_workspace_changeset": self.toolbox.apply_workspace_changeset,
             "memory_search": self.toolbox.memory_search,
             "memory_save": self.toolbox.memory_save,
             "send_media": self.toolbox.send_media,
@@ -2493,8 +2496,14 @@ class AgentLoop:
         Falls back to the full command string when parsing fails, and to the
         bare tool name for every other tool.
         """
-        if function_name == "run_command" and isinstance(function_args, dict):
+        if function_name in {"run_command", "run_steps"} and isinstance(
+            function_args, dict
+        ):
             command = str(function_args.get("command") or "").strip()
+            if function_name == "run_steps":
+                commands = function_args.get("commands") or []
+                if isinstance(commands, list) and commands:
+                    command = str(commands[0] or "").strip()
             if not command:
                 return function_name
             binary = command
@@ -2504,7 +2513,7 @@ class AgentLoop:
                     binary = parts[0]
             except Exception:
                 binary = command
-            return f"run_command::{binary}"
+            return f"{function_name}::{binary}"
         return function_name
 
     def _get_tool_approval_decision(
@@ -3357,7 +3366,7 @@ class AgentLoop:
                 self.background_subagent_tasks.pop(task_id, None)
             self.background_subagent_sessions.pop(task_id, None)
             self.background_subagent_parents.pop(task_id, None)
-            if isolated_workspace is not None:
+            if isolated_workspace is not None and not isolated_workspace.is_pending():
                 try:
                     await isolated_workspace.cleanup()
                 except Exception as exc:
@@ -3631,6 +3640,7 @@ class AgentLoop:
         isolation_mode: str = "none",
     ) -> str:
         workspace_token = None
+        retain_workspace = False
         try:
             if isolated_workspace is not None:
                 workspace_token = isolated_workspace.activate()
@@ -3886,6 +3896,9 @@ class AgentLoop:
             if isolated_workspace is not None:
                 try:
                     workspace_capture = await isolated_workspace.capture()
+                    if workspace_capture.get("status") == "changed":
+                        isolated_workspace.retain()
+                        retain_workspace = True
                     workspace_report = isolated_workspace.report_metadata(
                         workspace_capture
                     )
@@ -3907,7 +3920,8 @@ class AgentLoop:
                     if diff_entries:
                         workspace_report["diff"] = diff_entries
                     report += (
-                        "Workspace changes (not merged):\n"
+                        "Workspace changes (not merged; call apply_workspace_changeset "
+                        f"with workspace_id={isolated_workspace.workspace_id}):\n"
                         + json.dumps(workspace_report, ensure_ascii=False)
                         + "\n"
                     )
@@ -3948,7 +3962,7 @@ class AgentLoop:
                     logger.warning(
                         f"Could not restore workspace context for sub-agent '{sub_session_key}': {exc}"
                     )
-            if isolated_workspace is not None:
+            if isolated_workspace is not None and not retain_workspace:
                 try:
                     await isolated_workspace.cleanup()
                 except Exception as exc:
@@ -5358,7 +5372,7 @@ class AgentLoop:
         if "[TIMEOUT]" in text or "[STALL]" in text:
             return True
 
-        if function_name == "run_command":
+        if function_name in {"run_command", "run_steps"}:
             exit_code = self._extract_run_command_exit_code(text)
             if exit_code not in (None, 0):
                 return True
@@ -5409,7 +5423,7 @@ class AgentLoop:
         for tool_call in tool_calls or []:
             function = tool_call.get("function") if isinstance(tool_call, dict) else {}
             name = str((function or {}).get("name") or "")
-            if name in _MUTATION_TOOL_NAMES or name == "run_command":
+            if name in _MUTATION_TOOL_NAMES or name in {"run_command", "run_steps"}:
                 return True
         return False
 
@@ -5419,8 +5433,12 @@ class AgentLoop:
             return "verify"
         if function_name in _MUTATION_TOOL_NAMES:
             return "apply"
-        if function_name == "run_command":
-            command = str((function_args or {}).get("command") or "").lower()
+        if function_name in {"run_command", "run_steps"}:
+            command = str(
+                (function_args or {}).get("command")
+                or (function_args or {}).get("commands")
+                or ""
+            ).lower()
             if re.search(r"\b(test|pytest|unittest|lint|build|compile|check|verify)\b", command):
                 return "verify"
             return "apply"
@@ -5975,7 +5993,57 @@ class AgentLoop:
             message_id=message_id,
         )
 
+    def _collect_turn_tool_errors(self, session_key: str) -> List[Tuple[str, str]]:
+        """Return this turn's error/rejection/policy-deny tool results."""
+        errors: List[Tuple[str, str]] = []
+        for entry in reversed(self.history.get(session_key, [])):
+            role = entry.get("role")
+            if role == "user":
+                break
+            if role != "tool":
+                continue
+            name = str(entry.get("name") or "tool")
+            content = str(entry.get("content") or "").strip()
+            if self._is_tool_result_error(name, content):
+                errors.append((name, redact_sensitive_text(content)))
+        errors.reverse()
+        return errors
+
+    def _ensure_reply_includes_tool_errors(
+        self, reply: str, session_key: str
+    ) -> str:
+        """Make sure a failed tool's exact text is visible in the user reply."""
+        errors = self._collect_turn_tool_errors(session_key)
+        if not errors:
+            return reply
+        visible = str(reply or "")
+        missing: List[Tuple[str, str]] = []
+        for name, content in errors:
+            first_line = next(
+                (line.strip() for line in content.splitlines() if line.strip()),
+                content,
+            )
+            marker = first_line or content[:160]
+            if marker and marker in visible:
+                continue
+            if content[:120] and content[:120] in visible:
+                continue
+            missing.append((name, content))
+        if not missing:
+            return visible
+        blocks = [
+            f"`{name}` rejected:\n{content}" for name, content in missing
+        ]
+        appendix = "\n\n".join(blocks)
+        if visible.strip():
+            return visible.rstrip() + "\n\n" + appendix
+        return "I ran the requested tool(s), but they failed:\n" + appendix
+
     def _build_tool_fallback_reply(self, session_key: str, max_items: int = 2) -> str:
+        errors = self._collect_turn_tool_errors(session_key)
+        if errors:
+            return self._ensure_reply_includes_tool_errors("", session_key)
+
         tool_rows: List[Tuple[str, str]] = []
         for entry in reversed(self.history.get(session_key, [])):
             if entry.get("role") != "tool":
@@ -5989,25 +6057,7 @@ class AgentLoop:
         if not tool_rows:
             return "I finished running the tool, but I don't have a follow-up response yet."
 
-        tool_rows.reverse()
-        failed_rows: List[Tuple[str, str]] = []
-        for name, content in tool_rows:
-            if not self._is_tool_result_error(name, content):
-                continue
-            first_line = next(
-                (ln.strip() for ln in content.splitlines() if ln.strip()),
-                "Tool execution failed.",
-            )
-            if len(first_line) > 180:
-                first_line = first_line[:180] + "..."
-            first_line = redact_sensitive_text(first_line)
-            failed_rows.append((name, first_line))
-
-        if failed_rows:
-            lines = "\n".join([f"- `{name}`: {line}" for name, line in failed_rows])
-            return "I ran the requested tool(s), but they failed:\n" + lines
-
-        recent_tools = ", ".join(f"`{name}`" for name, _ in tool_rows)
+        recent_tools = ", ".join(f"`{name}`" for name, _ in reversed(tool_rows))
         return (
             "I finished the requested tool step(s) successfully, but I did not produce "
             f"a natural-language wrap-up. Recent steps: {recent_tools}."
@@ -6457,6 +6507,18 @@ class AgentLoop:
                             False,
                             is_internal,
                         )
+                if function_name == "run_steps":
+                    for step in function_args.get("commands") or []:
+                        validation_error = self.toolbox.validate_command(str(step or ""))
+                        if validation_error:
+                            return (
+                                tc_id,
+                                function_name,
+                                function_args,
+                                validation_error,
+                                False,
+                                is_internal,
+                            )
 
                 if function_name in _SENSITIVE_TOOLS:
                     approval = self._get_tool_approval_decision(
@@ -9573,6 +9635,16 @@ class AgentLoop:
 
                     # ── Self-repetition dedup ────────────────────────────
                     reply_to_user = self._dedupe_repeated_reply_sections(reply_to_user)
+                    reply_to_user = self._ensure_reply_includes_tool_errors(
+                        reply_to_user, session_key
+                    )
+                    raw_reply = raw_reply or reply_to_user
+                    if reply_to_user and not str(raw_reply or "").strip():
+                        raw_reply = reply_to_user
+                    if any_tool_calls_in_turn and self._collect_turn_tool_errors(
+                        session_key
+                    ):
+                        force_direct_reply = True
 
                     if soul_updated or identity_updated:
                         self._invalidate_stable_prompt(sender_id)

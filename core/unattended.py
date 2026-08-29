@@ -119,12 +119,30 @@ def evaluate_unattended_tool(
             "policy_profile": "unattended",
         }
 
-    if function_name in {"write_file", "edit_file", "delete_file", "create_spreadsheet"}:
-        allowed = path_is_allowlisted(str(args.get("path") or ""), policy["path_allowlist"])
+    if function_name in {
+        "write_file",
+        "edit_file",
+        "delete_file",
+        "create_spreadsheet",
+        "apply_workspace_changeset",
+    }:
+        target = str(args.get("path") or args.get("source_root") or "")
+        if function_name == "apply_workspace_changeset" and not target:
+            target = str(Path.cwd())
+        allowed = path_is_allowlisted(target, policy["path_allowlist"])
         detail = "unattended_path_allowlist" if allowed else "unattended_path_denied"
     elif function_name == "run_command":
         allowed = command_is_allowlisted(
             str(args.get("command") or ""), policy["command_allowlist"]
+        )
+        detail = "unattended_command_allowlist" if allowed else "unattended_command_denied"
+    elif function_name == "run_steps":
+        commands = args.get("commands") or []
+        if isinstance(commands, str):
+            commands = [commands]
+        allowed = bool(commands) and all(
+            command_is_allowlisted(str(item or ""), policy["command_allowlist"])
+            for item in commands
         )
         detail = "unattended_command_allowlist" if allowed else "unattended_command_denied"
     elif function_name == "cron_remove":

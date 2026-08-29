@@ -188,6 +188,89 @@ class TestToolFailureHandling(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(attempts, 2)
         self.assertIsNone(blocked)
 
+    async def test_rejected_and_command_is_visible_in_outbound_chat(self):
+        from core.bus import MessageBus
+        from core.events import InboundMessage
+        from core.loop import AgentLoop
+        from core.tools import Toolbox
+
+        class _TestAgentLoop(AgentLoop):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._consume_calls = 0
+
+            async def _init_skills_and_tools(self) -> None:
+                self._tool_definitions = []
+                self._warmed = True
+
+            async def _llm_call_with_retry(self, *args, **kwargs):
+                return object()
+
+            async def _consume_stream(self, *args, **kwargs):
+                self._consume_calls += 1
+                if self._consume_calls == 1:
+                    return (
+                        "",
+                        [
+                            {
+                                "id": "call_and",
+                                "type": "function",
+                                "function": {
+                                    "name": "run_command",
+                                    "arguments": (
+                                        '{"command":"python -m unittest && '
+                                        'python -m py_compile clamp.py"}'
+                                    ),
+                                },
+                            }
+                        ],
+                        None,
+                        False,
+                    )
+                return ("", [], None, False)
+
+            async def _execute_tool(
+                self, function_name: str, function_args: dict, session_key: str
+            ):
+                return self.toolbox.validate_command(
+                    str((function_args or {}).get("command") or "")
+                )
+
+            async def _build_full_system_prompt(self, *args, **kwargs):
+                return "SYSTEM: TEST"
+
+            async def _trim_history(self, *args, **kwargs):
+                return
+
+            async def _schedule_task_run_continuation(self, *args, **kwargs):
+                return False
+
+        bus = MessageBus()
+        agent = _TestAgentLoop(bus=bus)
+        agent.toolbox = Toolbox(allowed_paths=["/workspace"], bus=bus)
+        msg = InboundMessage(
+            channel="web",
+            sender_id="bakeoff-user",
+            chat_id="bakeoff-t6",
+            content="run one command with &&; if rejected, paste the rejection",
+            metadata={},
+        )
+
+        await agent._process_message(msg)
+
+        outbound = []
+        while not bus.outbound.empty():
+            outbound.append(await bus.consume_outbound())
+
+        replies = [
+            item
+            for item in outbound
+            if item.metadata.get("reply_to") == msg.sender_id and item.content
+        ]
+        self.assertTrue(replies, "Rejected && must not end the turn silently.")
+        combined = "\n".join(item.content for item in replies)
+        self.assertIn("forbidden character/sequence '&&'", combined)
+
     async def test_tool_failure_with_empty_followup_emits_fallback_reply(self):
         from core.bus import MessageBus
         from core.events import InboundMessage

@@ -176,7 +176,9 @@ Sandboxed OS interface. All methods check `_is_path_allowed()` before touching t
 | `cron_add(message, context, time_expr, cron_expr)` | No | Schedule a one-time or repeating job |
 | `cron_list()` | No | List all pending scheduled jobs |
 | `cron_remove(job_id)` | **Yes** | Cancel a scheduled job |
+| `run_steps(commands)` | **Yes** | Run two or more shell commands in order without `&&`. Stops on the first rejection or nonzero exit. |
 | `spawn_agent(task, isolation)` | No | Delegate a long, parallelizable, or specialist-matched task; `auto` isolates coding/review work, `copy` always captures changes in a temporary workspace, and `none` explicitly shares the live workspace |
+| `apply_workspace_changeset(workspace_id)` | **Yes** | Apply a retained copy-isolation changeset to the live tree with hash-guarded `edit_file`/`write_file`, then delete leftover clones |
 | `analyze_video(source, question, detail, start, end, max_frames, resolution)` | No | Analyze an allowed local video or public HTTP(S) video and return a transcript plus up to three contact sheets. |
 | `browser_navigate(url)` | No | Open a specific webpage. Always registered (the browser skill is not required). Named URLs and open/visit/go-to requests use this, not `web_search` |
 | `browser_act(action, ...)` | No | Snapshot, click, type, scroll, wait, press, back, tabs, switch_tab, or download on the current page. Always registered with `browser_navigate` |
@@ -198,7 +200,7 @@ installed; in that state it returns `npm run lime-bot feature install video`.
 The separately enabled `watch` skill only teaches selection of transcript,
 efficient, balanced, focused ranges, and 1024-resolution text inspection.
 
-**`run_command` security filter:** Blocks `;`, `&&`, `||`, `|`, `>`, `<`, `` ` ``, `$()`, `\n`, `sudo`, `chmod`, `chown`, `ifs=`, `pythonpath=`.
+**`run_command` security filter:** Live chat blocks `;`, `&&`, `||`, `>`, `<`, `` ` ``, `$()`, `\n`, `sudo`, `chmod`, `chown`, and `IFS=` / `PYTHONPATH=` assignments. Bare `|` is allowed except when piped into an interpreter (`| sh`, `| python`, …). Isolated `spawn_agent` copies additionally allow `&&`, `||`, `|`, and redirects while still blocking sudo, env assignment, live-root escapes, backticks, and `$()`. Use `run_steps` for a sequential unittest then `py_compile` chain. Env-assignment denials are LimeBot command policy, not an OS/environment block.
 
 `run_command` also rejects the root `main.py` service entrypoint because it is
 long-running and belongs behind `limebot start`. One-shot commands use
@@ -209,9 +211,11 @@ tree. Skill docs must invoke their own entrypoint, for example
 
 When `spawn_agent` uses copy isolation, file tools and `run_command` are rooted
 in a temporary clone outside the live project. Parent-directory escapes and
-absolute live-project paths are rejected. The clone is deleted after the
-subagent reports a bounded structured diff; applying that diff remains an
-explicit parent-side action.
+absolute live-project paths are rejected. Changed clones are retained with a
+`workspace_id` and applyable capture. The parent merges them with
+`apply_workspace_changeset` (hash-guarded `edit_file` / `write_file`), then
+leftover `temp/bakeoff-*-isolated` and `/tmp/limebot-subagent-*` directories
+are deleted. Clean clones are removed immediately.
 
 **Tool result limits** (per-tool, to control context window growth):
 
@@ -222,6 +226,8 @@ explicit parent-side action.
 | `verify_files` | 6,000 chars |
 | `diagnose_files` | 8,000 chars |
 | `spawn_agent` | 12,000 chars |
+| `run_steps` | 4,000 chars |
+| `apply_workspace_changeset` | 8,000 chars |
 | `browser_extract` | 5,000 chars |
 | `memory_search` | 3,000 chars |
 | `browser_act` | 3,000 chars |

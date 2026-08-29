@@ -1917,7 +1917,15 @@ class Toolbox:
         command = str(command or "").strip()
         if not command:
             return "Error: Command is required."
-        forbidden_regex = r"(\$\(|\`|&&|\|\||>|<|\n)"
+        workspace_root, source_root = self._active_workspace_paths()
+        isolated = workspace_root is not None and source_root is not None
+        # Isolated clones may chain/redirect because writes stay in the copy.
+        # Live chat still blocks && || redirects. Bare `|` is allowed on both
+        # paths except when piped into an interpreter.
+        if isolated:
+            forbidden_regex = r"(\$\(|\`|\n)"
+        else:
+            forbidden_regex = r"(\$\(|\`|&&|\|\||>|<|\n)"
         pseudo_call_match = re.match(
             r"^\s*([A-Za-z_][\w\.]*)\s*\((.*)\)\s*$", str(command or ""), re.DOTALL
         )
@@ -1926,7 +1934,7 @@ class Toolbox:
             getattr(self.config, "allow_unsafe_commands", False)
         ) if self.config else False
 
-        if not unsafe_allowed and re.search(
+        if not unsafe_allowed and not isolated and re.search(
             r"^\s*cd\s+/d\s+.+&&", command, re.IGNORECASE
         ):
             return (
@@ -1939,8 +1947,7 @@ class Toolbox:
         if long_running_hint:
             return long_running_hint
 
-        workspace_root, source_root = self._active_workspace_paths()
-        if workspace_root is not None and source_root is not None:
+        if isolated:
             normalized_command = os.path.normcase(command).replace("/", "\\")
             normalized_source_root = os.path.normcase(str(source_root)).replace(
                 "/", "\\"
@@ -1978,7 +1985,20 @@ class Toolbox:
 
         if not unsafe_allowed and re.search(forbidden_regex, command):
             match = re.search(forbidden_regex, command).group(0)
-            return f"Error: Command contains forbidden character/sequence '{match}'. Enable 'Allow Unsafe Commands' in Config to bypass this restriction."
+            if isolated:
+                return (
+                    f"Error: Isolated-workspace command contains forbidden "
+                    f"character/sequence '{match}'. Backticks, $(), and newlines "
+                    "stay blocked even inside a copy."
+                )
+            return (
+                f"Error: Command contains forbidden character/sequence '{match}'. "
+                "Live chat blocks &&, ||, redirects, backticks, $(), and newlines. "
+                "Use run_steps for a sequential unittest then py_compile chain, or "
+                "spawn_agent(isolation='copy') if you need shell chaining inside a "
+                "clone. Enable 'Allow Unsafe Commands' in Config to bypass this "
+                "restriction."
+            )
 
         if not unsafe_allowed and self._has_unquoted_semicolon(command):
             return "Error: Command contains forbidden character/sequence ';'. Enable 'Allow Unsafe Commands' in Config to bypass this restriction."
@@ -2000,8 +2020,20 @@ class Toolbox:
             )
 
         lowered_command = command.lower()
-        if any(f in lowered_command for f in ["ifs=", "pythonpath="]):
-            return "Error: Command or environment manipulation forbidden."
+        if "pythonpath=" in lowered_command:
+            return (
+                "Error: Environment assignment 'PYTHONPATH=' is blocked by LimeBot "
+                "command policy (validate_command). This is a host policy check, "
+                "not an OS or runtime environment rejection. Remove the assignment "
+                "from the command; do not claim the environment blocked it."
+            )
+        if "ifs=" in lowered_command:
+            return (
+                "Error: Environment assignment 'IFS=' is blocked by LimeBot "
+                "command policy (validate_command). This is a host policy check, "
+                "not an OS or runtime environment rejection. Remove the assignment "
+                "from the command; do not claim the environment blocked it."
+            )
 
         if not unsafe_allowed and any(
             f in lowered_command for f in ["sudo", "chmod", "chown"]
@@ -2311,6 +2343,41 @@ class Toolbox:
         except Exception as e:
             return f"Error executing command: {e}"
 
+    async def run_steps(self, commands: Any) -> str:
+        """Run one or more shell commands in order without requiring &&."""
+        if isinstance(commands, str):
+            commands = [commands]
+        if not isinstance(commands, list) or not commands:
+            return "Error: run_steps requires a non-empty commands array."
+        steps = [str(item).strip() for item in commands if str(item or "").strip()]
+        if not steps:
+            return "Error: run_steps requires a non-empty commands array."
+
+        parts: List[str] = []
+        for index, command in enumerate(steps, start=1):
+            validation_error = self.validate_command(command)
+            if validation_error:
+                parts.append(
+                    f"--- step {index}/{len(steps)} ---\n{command}\n{validation_error}"
+                )
+                return (
+                    "Error: run_steps stopped after a rejected command.\n"
+                    + "\n\n".join(parts)
+                )
+            result = await self.run_command(command)
+            parts.append(f"--- step {index}/{len(steps)} ---\n{command}\n{result}")
+            failed = str(result).startswith("Error:") or (
+                "Exit Code:" in str(result)
+                and not str(result).rstrip().endswith("Exit Code: 0")
+                and "Success (Exit Code: 0" not in str(result)
+            )
+            if failed:
+                return (
+                    "Error: run_steps stopped after a failed command.\n"
+                    + "\n\n".join(parts)
+                )
+        return "\n\n".join(parts)
+
     async def memory_search(self, query: str) -> str:
         """Search durable memory, using vectors when available and Markdown otherwise."""
         if not self.vector_service:
@@ -2514,18 +2581,162 @@ class Toolbox:
                 isolated_workspace=isolated_workspace,
                 isolation_mode=isolation_mode,
             )
+            if (
+                isolated_workspace is not None
+                and isolated_workspace.root.exists()
+                and not isolated_workspace.is_pending()
+            ):
+                capture = isolated_workspace.last_capture
+                if capture is None:
+                    capture = await isolated_workspace.capture()
+                if capture.get("status") == "changed":
+                    isolated_workspace.retain()
             return str(result)
         except Exception as e:
             logger.error(f"Error spawning agent: {e}")
             return f"Error spawning agent: {e}"
         finally:
-            if isolated_workspace is not None:
+            if isolated_workspace is not None and not isolated_workspace.is_pending():
                 try:
                     await isolated_workspace.cleanup()
                 except Exception as cleanup_error:
                     logger.warning(
                         f"Could not clean up isolated sub-agent workspace: {cleanup_error}"
                     )
+
+    async def apply_workspace_changeset(
+        self,
+        workspace_id: Optional[str] = None,
+        changeset: Optional[Any] = None,
+    ) -> str:
+        """Apply a retained copy-isolation capture to the live tree, then delete leftovers."""
+        from core.context import workspace_context
+        from core.workspace_isolation import (
+            IsolatedWorkspace,
+            cleanup_leftover_clones,
+            get_pending_workspace,
+            latest_pending_workspace,
+        )
+
+        workspace: Optional[IsolatedWorkspace] = None
+        capture: Optional[Dict[str, Any]] = None
+        requested_id = str(workspace_id or "").strip()
+        if requested_id:
+            workspace = get_pending_workspace(requested_id)
+        if workspace is None and not requested_id:
+            workspace = latest_pending_workspace()
+        if changeset:
+            if isinstance(changeset, str):
+                try:
+                    changeset = json.loads(changeset)
+                except json.JSONDecodeError as exc:
+                    return f"Error: changeset is not valid JSON: {exc}"
+            if not isinstance(changeset, dict):
+                return "Error: changeset must be an object with changed_files."
+            capture = changeset
+            capture_id = str(capture.get("workspace_id") or "").strip()
+            if workspace is None and capture_id:
+                workspace = get_pending_workspace(capture_id)
+        if workspace is None and capture is None:
+            return (
+                "Error: No retained isolated workspace to apply. "
+                "spawn_agent(isolation='copy') must finish with changes first."
+            )
+        if capture is None and workspace is not None:
+            if workspace.last_capture is not None:
+                capture = workspace.last_capture
+            else:
+                capture = await workspace.capture()
+        if not isinstance(capture, dict):
+            return "Error: Isolated workspace capture is missing."
+
+        changed_files = list(capture.get("changed_files") or [])
+        source_root = (
+            workspace.source_root
+            if workspace is not None
+            else Path(str(capture.get("source_root") or Path.cwd())).resolve()
+        )
+        apply_token = workspace_context.set({})
+        applied: List[Dict[str, Any]] = []
+        try:
+            for item in changed_files:
+                if not isinstance(item, dict):
+                    continue
+                relative = str(item.get("path") or "").strip()
+                if not relative or relative.startswith("/") or ".." in Path(relative).parts:
+                    return f"Error: Refusing to apply unsafe path '{relative}'."
+                live_path = str((source_root / relative).resolve())
+                status = str(item.get("status") or "modified")
+                if status == "deleted":
+                    result = await self.delete_file(live_path)
+                    applied.append({"path": relative, "status": status, "result": result})
+                    if str(result).startswith("Error:"):
+                        return json.dumps(
+                            {"status": "error", "applied": applied, "failed": relative},
+                            ensure_ascii=False,
+                        )
+                    continue
+                after_text = (
+                    workspace.applyable_file_text(item)
+                    if workspace is not None
+                    else item.get("after_text")
+                )
+                if not isinstance(after_text, str):
+                    return (
+                        f"Error: No applyable UTF-8 content for '{relative}'. "
+                        "The clone was deleted before apply and the capture had no after_text."
+                    )
+                before_sha = str(item.get("before_sha256") or "").strip().lower()
+                before_text = (
+                    workspace.applyable_before_text(item)
+                    if workspace is not None
+                    else item.get("before_text")
+                )
+                if status == "added" or not Path(live_path).exists():
+                    result = await self.write_file(live_path, after_text)
+                elif (
+                    isinstance(before_text, str)
+                    and re.fullmatch(r"[0-9a-f]{64}", before_sha)
+                ):
+                    result = await self.edit_file(
+                        live_path,
+                        [{"old_text": before_text, "new_text": after_text}],
+                        before_sha,
+                    )
+                else:
+                    if re.fullmatch(r"[0-9a-f]{64}", before_sha) and Path(live_path).is_file():
+                        current_sha = hashlib.sha256(Path(live_path).read_bytes()).hexdigest()
+                        if current_sha != before_sha:
+                            return (
+                                f"Error: Stale apply for '{relative}'. Live SHA-256 is "
+                                f"{current_sha}, not {before_sha}."
+                            )
+                    result = await self.write_file(live_path, after_text)
+                applied.append({"path": relative, "status": status, "result": result})
+                if str(result).startswith("Error:"):
+                    return json.dumps(
+                        {"status": "error", "applied": applied, "failed": relative},
+                        ensure_ascii=False,
+                    )
+        finally:
+            workspace_context.reset(apply_token)
+
+        if workspace is not None:
+            await workspace.cleanup()
+        leftovers = cleanup_leftover_clones(source_root)
+        return json.dumps(
+            {
+                "status": "applied",
+                "workspace_id": (
+                    workspace.workspace_id if workspace is not None else capture.get("workspace_id")
+                ),
+                "applied": [
+                    {"path": item["path"], "status": item["status"]} for item in applied
+                ],
+                "cleaned_leftovers": leftovers,
+            },
+            ensure_ascii=False,
+        )
 
     @staticmethod
     def _is_safe_public_url(url: str) -> tuple[bool, str]:

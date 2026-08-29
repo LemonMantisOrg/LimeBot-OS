@@ -110,7 +110,7 @@ Whitelisted filesystem operations:
 ### ⚙️ It Can Run Commands
 Secure subprocess execution with real-time output streaming:
 - Runs shell commands inside the project root
-- Shell injection filter blocks `;`, `&&`, `|`, backticks, `$()`, and env manipulation
+- Shell injection filter blocks `;`, `&&`, `||`, redirects, backticks, `$()`, and `IFS=` / `PYTHONPATH=` assignments in live chat. Bare `|` is allowed except when piped into an interpreter. Isolated copy workspaces may use `&&` / `||` / `|` / redirects; `run_steps` runs a sequential command chain without `&&`.
 - **Stall detection**  if a command produces no output for 30 seconds (likely waiting for interactive input), it's automatically terminated with guidance to retry using non-interactive flags
 - Requires user confirmation via the dashboard before any command executes
 - **Autonomous Mode**  optionally bypass all confirmation prompts for full hands-off operation
