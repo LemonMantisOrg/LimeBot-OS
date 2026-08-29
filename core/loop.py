@@ -73,6 +73,15 @@ from core.events import InboundMessage, OutboundMessage
 from core.llm_client import ChatRequest, LimeLLMClient, ProviderConfig
 from core.managed_tasks import ManagedTaskRegistry
 from core.job_queue import FAILED, SUCCEEDED, get_job_queue
+from core.operator_invariants import (
+    collect_subagent_failures,
+    ensure_visible_failures,
+    evaluate_operator_invariants,
+    format_invariant_next_action,
+    format_subagent_failure_block,
+    has_verification_evidence,
+    turn_had_file_mutations,
+)
 from core.recovery_controller import RecoveryState, classify_failure
 from core.task_runs import (
     ACTIVE_STATES as TASK_RUN_ACTIVE_STATES,
@@ -3838,6 +3847,10 @@ class AgentLoop:
                         }
                     )
 
+            child_failures = collect_subagent_failures(sub_history)
+            if child_failures and not str(final_result or "").strip():
+                final_result = format_subagent_failure_block(child_failures)
+
             if not str(final_result or "").strip():
                 summary_prompt = (
                     "Final response only. Do not call any more tools. "
@@ -3879,6 +3892,20 @@ class AgentLoop:
                     )
 
             final_result = self._clean_subagent_final_result(final_result)
+            if child_failures:
+                failure_block = format_subagent_failure_block(child_failures)
+                if failure_block and failure_block not in str(final_result or ""):
+                    final_result = (
+                        f"{final_result.rstrip()}\n\n{failure_block}"
+                        if str(final_result or "").strip()
+                        else failure_block
+                    )
+            if not str(final_result or "").strip():
+                final_result = (
+                    format_subagent_failure_block(child_failures)
+                    if child_failures
+                    else "Sub-agent finished without a visible result."
+                )
 
             report_title = (
                 f"--- SUB-AGENT REPORT ({sub_session_key}) [{agent_name}] ---"
@@ -3888,7 +3915,7 @@ class AgentLoop:
             report = (
                 f"{report_title}\n"
                 f"Task: {task}\n"
-                f"Result:\n{final_result or '(Silently completed)'}\n"
+                f"Result:\n{final_result}\n"
             )
 
             workspace_capture = None
@@ -5556,29 +5583,77 @@ class AgentLoop:
         coding_turn: bool,
         iterations_limit_reached: bool,
         unresolved_tool_failure: bool,
+        history: Optional[List[Dict[str, Any]]] = None,
+        session_key: str = "",
+        casual_turn: bool = False,
+        plan_mode: bool = False,
+        pending_workspaces: Optional[List[Any]] = None,
     ) -> bool:
         if iterations_limit_reached or unresolved_tool_failure:
             return False
+        goal = getattr(run, "goal", "")
+        coding_goal = is_coding_goal(goal)
+        mutated = turn_had_file_mutations(outcomes, history)
+        if casual_turn and not mutated and not coding_turn and not coding_goal:
+            return True
+        verdict = evaluate_operator_invariants(
+            casual_turn=casual_turn,
+            plan_mode=plan_mode,
+            coding_turn=coding_turn,
+            coding_goal=coding_goal,
+            outcomes=outcomes,
+            history=history,
+            session_key=session_key,
+            pending_workspaces=pending_workspaces,
+            unresolved_tool_failure=unresolved_tool_failure,
+            iterations_limit_reached=iterations_limit_reached,
+        )
+        if verdict.applies and not verdict.ok:
+            return False
         if not outcomes:
             checkpoint = getattr(run, "checkpoint", {}) or {}
-            return not is_coding_goal(getattr(run, "goal", "")) or checkpoint.get(
-                "verification_state"
-            ) == "passed"
-        if not is_coding_goal(getattr(run, "goal", "")):
+            if mutated or coding_goal:
+                return checkpoint.get("verification_state") == "passed"
             return True
-        verification_tools = {"verify_files", "diagnose_files"}
-        verified = any(
-            item.success
-            and (
-                item.tool in verification_tools
-                or (
-                    item.tool == "run_command"
-                    and item.verification_status in {"passed", "success", "completed", "ok"}
-                )
+        if mutated or coding_turn or coding_goal:
+            return has_verification_evidence(
+                outcomes,
+                history=history,
             )
-            for item in outcomes
+        return True
+
+    def _pending_isolated_workspaces(self) -> List[Any]:
+        try:
+            from core.workspace_isolation import list_pending_workspaces
+
+            return list_pending_workspaces()
+        except Exception:
+            return []
+
+    def _evaluate_operator_invariants(
+        self,
+        *,
+        session_key: str,
+        content: str,
+        coding_turn: bool,
+        coding_goal: bool,
+        plan_mode: bool,
+        outcomes: List[ToolOutcome],
+        unresolved_tool_failure: bool,
+        iterations_limit_reached: bool,
+    ) -> Any:
+        return evaluate_operator_invariants(
+            casual_turn=self._is_fast_casual_turn(content),
+            plan_mode=plan_mode,
+            coding_turn=coding_turn,
+            coding_goal=coding_goal,
+            outcomes=outcomes,
+            history=self.history.get(session_key, []),
+            session_key=session_key,
+            pending_workspaces=self._pending_isolated_workspaces(),
+            unresolved_tool_failure=unresolved_tool_failure,
+            iterations_limit_reached=iterations_limit_reached,
         )
-        return verified if coding_turn or is_coding_goal(getattr(run, "goal", "")) else True
 
     def _task_run_resume_instruction(self, run: Any) -> str:
         criteria = "\n".join(f"- {item}" for item in run.acceptance_criteria)
@@ -6038,6 +6113,32 @@ class AgentLoop:
         if visible.strip():
             return visible.rstrip() + "\n\n" + appendix
         return "I ran the requested tool(s), but they failed:\n" + appendix
+
+    def _ensure_reply_includes_operator_failures(
+        self,
+        reply: str,
+        session_key: str,
+        *,
+        verdict: Any = None,
+        task_run: Any = None,
+        extra_texts: Optional[List[str]] = None,
+    ) -> str:
+        """No silent fail: tool errors, verify/merge gaps, and blocked runs stay visible."""
+        visible = self._ensure_reply_includes_tool_errors(reply, session_key)
+        required: List[str] = list(extra_texts or [])
+        if task_run is not None and str(getattr(task_run, "status", "") or "") == TASK_RUN_BLOCKED:
+            blocked_error = str(getattr(task_run, "last_error", "") or "").strip()
+            if blocked_error:
+                required.append(blocked_error)
+        visible = ensure_visible_failures(visible, verdict, required_texts=required)
+        if (
+            verdict is not None
+            and getattr(verdict, "applies", False)
+            and not getattr(verdict, "ok", True)
+            and not str(visible or "").strip()
+        ):
+            visible = format_invariant_next_action(verdict)
+        return visible
 
     def _build_tool_fallback_reply(self, session_key: str, max_items: int = 2) -> str:
         errors = self._collect_turn_tool_errors(session_key)
@@ -8012,6 +8113,7 @@ class AgentLoop:
         recovery_required = False
         turn_status_override: Optional[str] = None
         turn_error_code = ""
+        operator_verdict = None
 
         def make_output_queued_recorder(
             iteration_kind: str, iteration: int
@@ -9472,18 +9574,39 @@ class AgentLoop:
                     else:
                         raw_reply = full_content
 
+                    operator_verdict = self._evaluate_operator_invariants(
+                        session_key=session_key,
+                        content=content,
+                        coding_turn=coding_turn,
+                        coding_goal=is_coding_goal(getattr(task_run, "goal", "") if task_run else content),
+                        plan_mode=plan_mode,
+                        outcomes=all_tool_outcomes,
+                        unresolved_tool_failure=unresolved_tool_failure,
+                        iterations_limit_reached=iterations_limit_reached,
+                    )
                     if task_run is not None:
-                        accepted = bool(plan_mode) or self._task_run_acceptance_satisfied(
-                            task_run,
-                            all_tool_outcomes,
-                            coding_turn=coding_turn,
-                            iterations_limit_reached=iterations_limit_reached,
-                            unresolved_tool_failure=unresolved_tool_failure,
+                        accepted = bool(plan_mode) or (
+                            self._task_run_acceptance_satisfied(
+                                task_run,
+                                all_tool_outcomes,
+                                coding_turn=coding_turn,
+                                iterations_limit_reached=iterations_limit_reached,
+                                unresolved_tool_failure=unresolved_tool_failure,
+                                history=self.history.get(session_key, []),
+                                session_key=session_key,
+                                casual_turn=self._is_fast_casual_turn(content),
+                                plan_mode=plan_mode,
+                                pending_workspaces=self._pending_isolated_workspaces(),
+                            )
+                            and (not operator_verdict.applies or operator_verdict.ok)
                         )
-                        verified = any(
-                            outcome.success
-                            and outcome.tool in {"verify_files", "diagnose_files"}
-                            for outcome in all_tool_outcomes
+                        verified = bool(
+                            operator_verdict.ok
+                            and has_verification_evidence(
+                                all_tool_outcomes,
+                                mutated_paths=operator_verdict.mutated_paths,
+                                history=self.history.get(session_key, []),
+                            )
                         )
                         if verified:
                             task_run.checkpoint["verification_state"] = "passed"
@@ -9499,7 +9622,7 @@ class AgentLoop:
                                     if recovery_state is not None
                                     else {},
                                     "verification_state": "passed"
-                                    if verified or not is_coding_goal(task_run.goal)
+                                    if verified
                                     else task_run.checkpoint.get("verification_state"),
                                 },
                             ) or task_run
@@ -9514,18 +9637,30 @@ class AgentLoop:
                                 "permission_policy",
                                 "cancellation",
                             }
+                            invariant_error = (
+                                format_invariant_next_action(operator_verdict)
+                                if operator_verdict.applies and not operator_verdict.ok
+                                else ""
+                            )
+                            block_error = (
+                                unresolved_failure_detail
+                                or invariant_error
+                                or "A required external permission or credential is unavailable."
+                            )
                             if hard_blocker:
                                 task_run = self.task_runs.block(
                                     task_run.run_id,
-                                    error=unresolved_failure_detail
-                                    or "A required external permission or credential is unavailable.",
+                                    error=block_error,
                                     next_action="Resolve the blocker, then retry the task.",
                                 ) or task_run
                             else:
                                 next_action = (
-                                    "Inspect the last tool diagnostic and apply one targeted correction."
-                                    if unresolved_tool_failure
-                                    else "Run a narrowed verification check before claiming completion."
+                                    invariant_error
+                                    or (
+                                        "Inspect the last tool diagnostic and apply one targeted correction."
+                                        if unresolved_tool_failure
+                                        else "Run a narrowed verification check before claiming completion."
+                                    )
                                 )
                                 progress_prefix = (
                                     "The last step failed, but I’m continuing this task "
@@ -9541,9 +9676,9 @@ class AgentLoop:
                                     msg,
                                     next_action=next_action,
                                     phase=TASK_RUN_REPAIRING
-                                    if unresolved_tool_failure
+                                    if unresolved_tool_failure or getattr(operator_verdict, "missing_apply", False)
                                     else TASK_RUN_VERIFYING,
-                                    error=unresolved_failure_detail,
+                                    error=unresolved_failure_detail or invariant_error,
                                     # The original failed operation is evidence
                                     # for recovery, not a corrective failure.
                                     # Count only failures observed after the
@@ -9555,6 +9690,27 @@ class AgentLoop:
                                     ),
                                     recovery=recovery_state,
                                 )
+                                if not task_run_continuation_scheduled:
+                                    task_run = self.task_runs.block(
+                                        task_run.run_id,
+                                        error=block_error,
+                                        next_action=next_action,
+                                    ) or task_run
+                                    task_run_progress_reply = block_error
+                    elif (
+                        operator_verdict is not None
+                        and operator_verdict.applies
+                        and not operator_verdict.ok
+                    ):
+                        turn_status_override = turn_status_override or "blocked"
+                    if (
+                        operator_verdict is not None
+                        and operator_verdict.applies
+                        and not operator_verdict.ok
+                    ):
+                        force_direct_reply = True
+                        if not str(raw_reply or "").strip():
+                            raw_reply = format_invariant_next_action(operator_verdict)
 
                     if plan_mode and raw_reply:
                         await self._persist_coding_plan(
@@ -9579,8 +9735,18 @@ class AgentLoop:
                         self._mark_dirty(session_key)
 
                     if coding_turn and raw_reply and not recovery_blocked:
+                        coding_phase = (
+                            "blocked"
+                            if (
+                                (operator_verdict is not None and operator_verdict.applies and not operator_verdict.ok)
+                                or (task_run is not None and getattr(task_run, "status", "") == TASK_RUN_BLOCKED)
+                            )
+                            else "complete"
+                            if task_run is None or getattr(task_run, "status", "") == TASK_RUN_COMPLETED
+                            else "verify"
+                        )
                         await self._emit_coding_phase(
-                            "complete",
+                            coding_phase,
                             session_key,
                             msg,
                             turn_id=turn_id,
@@ -9635,8 +9801,14 @@ class AgentLoop:
 
                     # ── Self-repetition dedup ────────────────────────────
                     reply_to_user = self._dedupe_repeated_reply_sections(reply_to_user)
-                    reply_to_user = self._ensure_reply_includes_tool_errors(
-                        reply_to_user, session_key
+                    reply_to_user = self._ensure_reply_includes_operator_failures(
+                        reply_to_user,
+                        session_key,
+                        verdict=operator_verdict,
+                        task_run=task_run,
+                        extra_texts=[unresolved_failure_detail]
+                        if unresolved_failure_detail
+                        else None,
                     )
                     raw_reply = raw_reply or reply_to_user
                     if reply_to_user and not str(raw_reply or "").strip():
