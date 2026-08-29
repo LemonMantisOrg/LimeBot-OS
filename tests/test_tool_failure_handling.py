@@ -192,7 +192,6 @@ class TestToolFailureHandling(unittest.IsolatedAsyncioTestCase):
         from core.bus import MessageBus
         from core.events import InboundMessage
         from core.loop import AgentLoop
-        from core.tools import Toolbox
 
         class _TestAgentLoop(AgentLoop):
             def __init__(self, *args, **kwargs):
@@ -229,13 +228,6 @@ class TestToolFailureHandling(unittest.IsolatedAsyncioTestCase):
                     )
                 return ("", [], None, False)
 
-            async def _execute_tool(
-                self, function_name: str, function_args: dict, session_key: str
-            ):
-                return self.toolbox.validate_command(
-                    str((function_args or {}).get("command") or "")
-                )
-
             async def _build_full_system_prompt(self, *args, **kwargs):
                 return "SYSTEM: TEST"
 
@@ -247,7 +239,6 @@ class TestToolFailureHandling(unittest.IsolatedAsyncioTestCase):
 
         bus = MessageBus()
         agent = _TestAgentLoop(bus=bus)
-        agent.toolbox = Toolbox(allowed_paths=["/workspace"], bus=bus)
         msg = InboundMessage(
             channel="web",
             sender_id="bakeoff-user",

@@ -81,7 +81,8 @@ async def test_isolated_workspace_allows_shell_chaining_but_not_escapes():
             assert toolbox.validate_command("true || false") is None
             assert toolbox.validate_command("echo hi | grep hi") is None
             assert toolbox.validate_command("echo hi > out.txt") is None
-            assert "sudo" in (toolbox.validate_command("sudo python ok.py") or "").lower()
+            privileged = toolbox.validate_command("sudo python ok.py") or ""
+            assert "privileged" in privileged.lower()
             assert "PYTHONPATH=" in (toolbox.validate_command("PYTHONPATH=. python ok.py") or "")
             assert "$(" in (toolbox.validate_command("echo $(whoami)") or "")
             assert "cannot escape" in (toolbox.validate_command("cat ../secret") or "")
