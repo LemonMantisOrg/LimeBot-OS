@@ -53,6 +53,8 @@ CHAT_MEDIA_BLOCKED_TOOLS: Tuple[str, ...] = (
     "spawn_agent",
     "capability_search",
     "run_command",
+    "run_steps",
+    "apply_workspace_changeset",
     "send_media",
     "google_search",
     "image_search",

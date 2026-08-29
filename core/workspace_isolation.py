@@ -1,9 +1,10 @@
 """Copy-on-write workspaces for subagent execution.
 
 The parent workspace is never used as the write target while an isolated
-subagent context is active.  This module intentionally captures a bounded
-diff instead of silently merging changes; applying a patch remains an
-explicit, approval-aware parent action.
+subagent context is active.  This module captures a bounded applyable
+changeset instead of silently merging. The parent must call
+``apply_workspace_changeset`` (or ``IsolatedWorkspace.apply_to_source``)
+to write the capture into the live tree, then leftover clones are deleted.
 """
 
 from __future__ import annotations
@@ -11,12 +12,15 @@ from __future__ import annotations
 import hashlib
 import shutil
 import tempfile
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from core.context import workspace_context
 from core.file_edits import unified_text_diff
+
+_PENDING_WORKSPACES: Dict[str, "IsolatedWorkspace"] = {}
 
 
 _IGNORED_DIRS = frozenset(
@@ -156,6 +160,8 @@ def _capture_sync(
             try:
                 before_text = before_bytes.decode("utf-8")
                 after_text = after_bytes.decode("utf-8")
+                entry["before_text"] = before_text
+                entry["after_text"] = after_text
                 if diff_budget > 0:
                     diff = unified_text_diff(
                         before_text,
@@ -185,6 +191,72 @@ def _capture_sync(
     }
 
 
+def register_pending_workspace(workspace: "IsolatedWorkspace") -> str:
+    workspace_id = workspace.workspace_id
+    _PENDING_WORKSPACES[workspace_id] = workspace
+    return workspace_id
+
+
+def unregister_pending_workspace(workspace: "IsolatedWorkspace") -> None:
+    _PENDING_WORKSPACES.pop(workspace.workspace_id, None)
+
+
+def get_pending_workspace(workspace_id: str) -> Optional["IsolatedWorkspace"]:
+    return _PENDING_WORKSPACES.get(str(workspace_id or "").strip())
+
+
+def latest_pending_workspace() -> Optional["IsolatedWorkspace"]:
+    if not _PENDING_WORKSPACES:
+        return None
+    return next(reversed(_PENDING_WORKSPACES.values()))
+
+
+def list_pending_workspaces() -> List["IsolatedWorkspace"]:
+    return list(_PENDING_WORKSPACES.values())
+
+
+def leftover_clone_paths(source_root: Optional[Path] = None) -> List[Path]:
+    """Return clone directories that are not a still-pending IsolatedWorkspace."""
+    pending_roots = {workspace.root.resolve() for workspace in _PENDING_WORKSPACES.values()}
+    found: List[Path] = []
+    search_roots = []
+    if source_root is not None:
+        search_roots.append(Path(source_root) / "temp")
+    search_roots.append(Path.cwd() / "temp")
+    seen: set[Path] = set()
+    for root in search_roots:
+        if not root.is_dir():
+            continue
+        for path in root.glob("bakeoff-*-isolated"):
+            resolved = path.resolve()
+            if resolved in seen or resolved in pending_roots:
+                continue
+            seen.add(resolved)
+            found.append(path)
+    tmp = Path(tempfile.gettempdir())
+    for path in tmp.glob("limebot-subagent-*"):
+        resolved = path.resolve()
+        if resolved in seen or resolved in pending_roots:
+            continue
+        seen.add(resolved)
+        found.append(path)
+    return found
+
+
+def cleanup_leftover_clones(source_root: Optional[Path] = None) -> List[str]:
+    removed: List[str] = []
+    for path in leftover_clone_paths(source_root):
+        try:
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            elif path.exists():
+                path.unlink()
+            removed.append(str(path))
+        except OSError:
+            continue
+    return removed
+
+
 @dataclass
 class IsolatedWorkspace:
     """A temporary source snapshot used by one subagent execution."""
@@ -193,6 +265,8 @@ class IsolatedWorkspace:
     root: Path
     label: str
     baseline: Dict[str, Dict[str, Any]]
+    workspace_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    last_capture: Optional[Dict[str, Any]] = None
     _cleaned: bool = False
 
     @classmethod
@@ -232,6 +306,7 @@ class IsolatedWorkspace:
             "root": str(self.root),
             "source_root": str(self.source_root),
             "label": self.label,
+            "workspace_id": self.workspace_id,
         }
 
     def activate(self):
@@ -244,9 +319,20 @@ class IsolatedWorkspace:
     async def capture(self) -> Dict[str, Any]:
         import asyncio
 
-        return await asyncio.to_thread(_capture_sync, self.root, self.baseline)
+        capture = await asyncio.to_thread(_capture_sync, self.root, self.baseline)
+        capture["workspace_id"] = self.workspace_id
+        self.last_capture = capture
+        return capture
+
+    def retain(self) -> str:
+        """Keep this clone until the parent applies or cleans it up."""
+        return register_pending_workspace(self)
+
+    def is_pending(self) -> bool:
+        return get_pending_workspace(self.workspace_id) is self
 
     async def cleanup(self) -> None:
+        unregister_pending_workspace(self)
         if self._cleaned:
             return
         self._cleaned = True
@@ -254,12 +340,31 @@ class IsolatedWorkspace:
 
         await asyncio.to_thread(shutil.rmtree, self.root, ignore_errors=True)
 
+    def applyable_file_text(self, item: Dict[str, Any]) -> Optional[str]:
+        relative = str(item.get("path") or "")
+        if not relative or item.get("status") == "deleted":
+            return None
+        clone_path = self.root / relative
+        if clone_path.is_file():
+            try:
+                return clone_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                pass
+        after_text = item.get("after_text")
+        return after_text if isinstance(after_text, str) else None
+
+    def applyable_before_text(self, item: Dict[str, Any]) -> Optional[str]:
+        before_text = item.get("before_text")
+        return before_text if isinstance(before_text, str) else None
+
     def report_metadata(self, capture: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "mode": "copy",
             "label": self.label,
+            "workspace_id": self.workspace_id,
             "status": capture.get("status", "clean"),
             "summary": capture.get("summary", {}),
+            "apply_tool": "apply_workspace_changeset",
             "changed_files": [
                 {
                     key: value

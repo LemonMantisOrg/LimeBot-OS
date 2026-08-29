@@ -399,9 +399,12 @@ BASE_TOOLS = [
         "description": (
             "Execute one shell command only when native tools are insufficient or the user explicitly "
             "wants command execution. Commands run from the project root on "
-            f"{'Windows' if os.name == 'nt' else 'a POSIX system'}. Never use heredocs, newlines, "
-            "&&, ||, semicolon chaining, redirects, backticks, or $(). Prefer read_file, list_dir, "
-            "search_files, calculate, create_spreadsheet, or browser tools first."
+            f"{'Windows' if os.name == 'nt' else 'a POSIX system'}. Live chat blocks heredocs, "
+            "newlines, &&, ||, semicolon chaining, redirects, backticks, and $(). Bare `|` is "
+            "allowed except when piped into an interpreter. For unittest then py_compile, use "
+            "run_steps instead of &&. Isolated spawn_agent copies may use && / || / | / redirects. "
+            "Prefer read_file, list_dir, search_files, calculate, create_spreadsheet, or browser "
+            "tools first."
         ),
         "params": {
             "command": {
@@ -410,6 +413,22 @@ BASE_TOOLS = [
             }
         },
         "required": ["command"],
+    },
+    {
+        "name": "run_steps",
+        "description": (
+            "Run two or more shell commands in order in the active workspace. This is the safe "
+            "replacement for && chains such as unittest then py_compile. Each step is validated "
+            "and executed separately; later steps do not run after a rejection or nonzero exit."
+        ),
+        "params": {
+            "commands": {
+                "type": "array",
+                "description": "Shell commands to run in order.",
+                "items": {"type": "string"},
+            }
+        },
+        "required": ["commands"],
     },
     {
         "name": "memory_search",
@@ -466,13 +485,34 @@ BASE_TOOLS = [
                 "enum": ["auto", "copy", "none"],
                 "description": (
                     "Workspace mode for the sub-agent. 'auto' uses a temporary copy for coding, "
-                    "repository, review, and verification work; 'copy' always isolates file edits; "
-                    "'none' keeps the existing workspace and should be reserved for read-only or "
-                    "explicitly shared tasks."
+                    "repository, review, and verification work; 'copy' always isolates file edits "
+                    "and retains the clone plus a structured changeset until "
+                    "apply_workspace_changeset merges it; 'none' keeps the existing workspace and "
+                    "should be reserved for read-only or explicitly shared tasks."
                 ),
             },
         },
         "required": ["task"],
+    },
+    {
+        "name": "apply_workspace_changeset",
+        "description": (
+            "Apply a retained spawn_agent(isolation='copy') changeset to the live tree using "
+            "hash-guarded edit_file / write_file, then delete leftover clones "
+            "(temp/bakeoff-*-isolated and /tmp/limebot-subagent-*). Live files stay unchanged "
+            "until this tool runs. Pass the workspace_id from the sub-agent report."
+        ),
+        "params": {
+            "workspace_id": {
+                "type": "string",
+                "description": "workspace_id from the isolated sub-agent report.",
+            },
+            "changeset": {
+                "type": "object",
+                "description": "Optional structured capture with changed_files if the clone is already gone.",
+            },
+        },
+        "required": [],
     },
     {
         "name": "get_task_output",
@@ -940,6 +980,8 @@ _TOOL_FAMILIES = {
     "create_skill": "filesystem",
     "edit_skill": "filesystem",
     "run_command": "command",
+    "run_steps": "command",
+    "apply_workspace_changeset": "filesystem",
     "memory_search": "memory",
     "memory_save": "memory",
     "generate_image": "media",
@@ -1178,7 +1220,7 @@ _FAMILY_HINTS = {
 
 _MANDATORY_FAMILY_TOOLS = {
     "filesystem": {"search_files", "read_file", "list_dir"},
-    "command": {"run_command"},
+    "command": {"run_command", "run_steps"},
     "browser": {
         "browser_navigate",
         "browser_act",
@@ -1218,6 +1260,8 @@ _TOOL_HINTS = {
     "verify_files": {"verify", "validate", "check", "syntax", "test", "lint", "whitespace", "conflict"},
     "diagnose_files": {"diagnose", "diagnostics", "lint", "linter", "typecheck", "type-check", "pyright", "ruff", "eslint", "tsc", "language-server", "lsp"},
     "run_command": {"run", "command", "terminal", "shell", "script", "git", "pytest", "npm", "python"},
+    "run_steps": {"run", "steps", "chain", "unittest", "py_compile", "compile", "sequence"},
+    "apply_workspace_changeset": {"apply", "merge", "changeset", "isolated", "clone", "workspace"},
     "memory_search": {"memory", "remember", "recall", "history", "journal"},
     "memory_save": {"memory", "remember", "save", "journal", "fact", "preference"},
     "generate_image": {"draw", "render", "generate", "art", "create", "imagine", "paint", "dalle"},

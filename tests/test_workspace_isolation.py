@@ -92,12 +92,72 @@ class TestWorkspaceIsolation(unittest.IsolatedAsyncioTestCase):
                     "cannot address the live project",
                     toolbox.validate_command(f"type {source_file}"),
                 )
+                self.assertIsNone(
+                    toolbox.validate_command("python -m unittest && python -m py_compile sample.txt")
+                )
+                self.assertIn(
+                    "PYTHONPATH=",
+                    toolbox.validate_command("PYTHONPATH=. python -m unittest") or "",
+                )
             finally:
                 workspace.deactivate(token)
         finally:
             await workspace.cleanup()
 
-    async def test_spawn_agent_owns_and_cleans_the_copy(self):
+    async def test_live_tree_unchanged_until_apply_then_clone_gone(self):
+        from core.bus import MessageBus
+        from core.tools import Toolbox
+        from core.workspace_isolation import IsolatedWorkspace
+
+        source_file = self.source_root / "clamp.py"
+        source_file.write_text("def clamp(n):\n    return n\n", encoding="utf-8")
+        leftover = Path("temp") / "bakeoff-t4-isolated"
+        leftover.mkdir(parents=True, exist_ok=True)
+        (leftover / "stale.txt").write_text("leftover\n", encoding="utf-8")
+
+        workspace = await IsolatedWorkspace.create(self.source_root, label="apply")
+        toolbox = Toolbox(
+            allowed_paths=[str(Path.cwd()), str(self.source_root)],
+            bus=MessageBus(),
+            config=SimpleNamespace(skills=SimpleNamespace(enabled=[])),
+        )
+        toolbox.allowed_paths = [Path.cwd().resolve(), self.source_root.resolve()]
+        token = workspace.activate()
+        try:
+            expected = hashlib.sha256(
+                (workspace.root / "clamp.py").read_bytes()
+            ).hexdigest()
+            result = json.loads(
+                await toolbox.edit_file(
+                    "clamp.py",
+                    [{"old_text": "return n", "new_text": "return max(0, min(n, 10))"}],
+                    expected,
+                )
+            )
+            self.assertEqual(result["status"], "applied")
+            self.assertEqual(
+                source_file.read_text(encoding="utf-8"),
+                "def clamp(n):\n    return n\n",
+            )
+            capture = await workspace.capture()
+            self.assertEqual(capture["status"], "changed")
+            workspace.retain()
+        finally:
+            workspace.deactivate(token)
+
+        self.assertTrue(workspace.root.exists())
+        applied = json.loads(
+            await toolbox.apply_workspace_changeset(workspace_id=workspace.workspace_id)
+        )
+        self.assertEqual(applied["status"], "applied")
+        self.assertEqual(
+            source_file.read_text(encoding="utf-8"),
+            "def clamp(n):\n    return max(0, min(n, 10))\n",
+        )
+        self.assertFalse(workspace.root.exists())
+        self.assertFalse(leftover.exists())
+
+    async def test_spawn_agent_retains_copy_until_apply(self):
         from core.bus import MessageBus
         from core.tools import Toolbox
 
@@ -142,6 +202,19 @@ class TestWorkspaceIsolation(unittest.IsolatedAsyncioTestCase):
         self.assertIn("finished in copy", result)
         self.assertFalse((self.source_root / "created.txt").exists())
         self.assertIsNotNone(fake_agent.workspace)
+        self.assertTrue(fake_agent.workspace.root.exists())
+        self.assertTrue(fake_agent.workspace.is_pending())
+
+        applied = json.loads(
+            await toolbox.apply_workspace_changeset(
+                workspace_id=fake_agent.workspace.workspace_id
+            )
+        )
+        self.assertEqual(applied["status"], "applied")
+        self.assertEqual(
+            (self.source_root / "created.txt").read_text(encoding="utf-8"),
+            "only in the copy\n",
+        )
         self.assertFalse(fake_agent.workspace.root.exists())
 
 
