@@ -72,6 +72,14 @@ graph TD
 
 ---
 
+
+## 🚀 Latest Updates (v1.0.3)
+- **Discord Personalization:** Added per-guild/per-channel tone, verbosity, emoji usage, signatures, and embed theming.
+- **GitHub Skill Defaults:** Automatic repo, base branch, PR templates, reviewers, labels, and push notifications.
+- **Skill Dependencies & UI:** Visibility of required dependencies and missing-deps alerts in the UI.
+- **Improved Reflection:** Skipping LLM reflection calls when no journal exists to prevent setup-time errors.
+- **Themed Discord Embeds:** Upgraded tool outputs visually.
+
 ## ✨ What It Can Actually Do
 
 ### 🧠 It Remembers Everything
