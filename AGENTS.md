@@ -45,8 +45,12 @@ The heart of the system. Manages:
 - **Auto-RAG** — before every LLM call, runs semantic vector search (falls back to the Markdown memory source if embeddings are unavailable). Injects matching memories into the prompt automatically.
 - **Tool execution loop** — after each LLM response, if tool calls are returned, executes them in parallel and loops back to the LLM (up to 30 iterations). Sensitive tools require user confirmation.
 - **Durable task runs** — state-changing and coding requests receive a persistent task-run identity, acceptance criteria, checkpoints, continuation slices, and crash-resume metadata. A turn can return a progress update while the same task continues from its checkpoint.
-- **Progress-aware recovery** — typed tool failures classify invalid arguments, skill defects, dependencies, authentication, policy, timeouts, transient providers, command failures, cancellation, and unknown errors. Diagnostics are free; corrective recovery is bounded by `TOOL_RECOVERY_MAX_CORRECTIVE_FAILURES` (default 5), and duplicate no-progress actions are gated before execution.
-- **Sub-agent delegation** — `spawn_agent` creates an isolated session that runs its own tool loop, can use named specialist profiles, defaults coding/review work to a temporary copy-on-write workspace, captures a bounded structured diff, and reports back to the parent without merging changes implicitly.
+- **Operator invariants** (`core/operator_invariants.py`) — the loop, not the prompt, gates terminal success for durable / coding / file-mutating / isolated-subagent task runs. Casual small talk is exempt and the fast harness still strips tools on greetings.
+  1. **VERIFY** — a mutating turn cannot go `completed` / Ready / IDLE claiming success until `verify_files` (or the tests/commands the task used as proof) ran on the files the turn changed. Missing proof refuses success: the loop injects a continuation that requires verify, or completes as `blocked` with the missing-proof named in outbound chat.
+  2. **MERGE** — copy-isolated `spawn_agent` work that retained a changeset cannot succeed while that clone is unapplied. The parent must call `apply_workspace_changeset`; the live tree stays unchanged until apply. An unapplied leftover is a hard stop that names `workspace_id` in chat, not a leftover directory the user is expected to notice.
+  3. **NO SILENT FAIL** — tool errors, rejections, policy denials, verify failures, refused merges, and blocked task-run terminals must appear in the user-visible outbound turn. Ready/IDLE with empty chat after a failure is a loop bug. Child sub-agent failures are copied into the parent `SUB-AGENT REPORT`.
+- **Progress-aware recovery** — typed tool failures classify invalid arguments, skill defects, dependencies, authentication, policy, timeouts, transient providers, command failures, cancellation, and unknown errors. Diagnostics are free; corrective recovery is bounded by `TOOL_RECOVERY_MAX_CORRECTIVE_FAILURES` (default 5), and duplicate no-progress actions are gated before execution. Recovery evidence does not by itself mark a task complete; VERIFY still has to pass.
+- **Sub-agent delegation** — `spawn_agent` creates an isolated session that runs its own tool loop, can use named specialist profiles, defaults coding/review work to a temporary copy-on-write workspace, captures a bounded structured diff, and reports back to the parent without merging changes implicitly. The parent loop then enforces MERGE: success requires `apply_workspace_changeset`, or the turn is blocked with the unapplied `workspace_id`.
 - **Capability readiness gate** — skill, subagent, MCP, and tool discovery run through explicit startup phases. User turns wait for required skills/tools before prompt or schema construction; optional MCP failures produce `degraded` readiness rather than blocking chat. Embedding and LLM warmups are not part of the required gate.
 - **Per-session dedup** — identical consecutive messages within 2 seconds are silently dropped, keyed per session (not globally).
 - **History summarization** — when token count exceeds limit, older messages are summarized by the LLM and squashed; large tool outputs from old turns are truncated in-place.
@@ -72,7 +76,8 @@ inspection, verification, and corrective budget. On recovery, LimeBot rebuilds t
 catalog from registered names and supplies the failing tool plus exact diagnostic,
 editing, verification, and command tools. Invalid-argument retries require successful
 source/schema inspection first. Authentication, policy, cancellation, and non-editable
-source blockers remain hard stops.
+source blockers remain hard stops. `verification_state` is evidence for recovery only;
+`core/operator_invariants.py` is what refuses terminal success without proof.
 
 ---
 
@@ -157,7 +162,7 @@ Sandboxed OS interface. All methods check `_is_path_allowed()` before touching t
 | `read_file(path, include_hash)` | No | Read file contents (20k char limit); optionally return the raw-file SHA-256 for stale-edit protection |
 | `edit_file(path, edits, expected_sha256)` | **Yes** | Apply exact, preflighted, atomic UTF-8 text edits with hash/anchor/no-op guards and a bounded diff. If the intended text is already on disk after a crash resume, returns `already_applied` instead of failing the job. |
 | `write_file(path, content)` | **Yes** | Create or overwrite a file |
-| `verify_files(paths, include_diagnostics)` | No | Run bounded read-only conflict-marker, syntax, TOML/JSON/Python, and Git whitespace checks; optionally invoke installed diagnostics |
+| `verify_files(paths, include_diagnostics)` | No | Run bounded read-only conflict-marker, syntax, TOML/JSON/Python, and Git whitespace checks; optionally invoke installed diagnostics. For mutating task runs the loop requires this (or an equivalent proof command) before success; skipping it cannot complete the turn. |
 | `diagnose_files(paths, provider)` | No | Optionally run installed Ruff, Pyright, ESLint, or TypeScript diagnostics through direct subprocess arguments; missing providers return `skipped` |
 | `create_spreadsheet(path, sheets, title)` | **Yes** | Create a styled, formula-capable `.xlsx` workbook without an ad-hoc script |
 | `delete_file(path)` | **Yes** | Delete a file or directory tree |
