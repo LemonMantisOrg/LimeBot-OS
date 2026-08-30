@@ -6,6 +6,19 @@ from unittest.mock import patch
 ROSE_REQUEST = (
     "download a picture of rose of blackpink for me and send me that in this chat"
 )
+JENNIE_ELLE_REQUEST = "traeme una foto de jennie de elle korea"
+SPANISH_PHOTO_REQUESTS = (
+    JENNIE_ELLE_REQUEST,
+    "tráeme una foto",
+    "trae una foto de jennie",
+    "pásame una foto",
+    "pasame una foto",
+    "mandame una foto",
+    "mándame una foto de jennie",
+    "send me a picture of jennie from elle korea",
+    "show me a photo of jennie",
+    "bring me a photo of jennie from elle korea",
+)
 
 
 class TestChatMediaIntent(unittest.TestCase):
@@ -27,6 +40,17 @@ class TestChatMediaIntent(unittest.TestCase):
         prompt = "generate an image of a lime robot"
         self.assertTrue(is_image_generation_request(prompt))
         self.assertFalse(is_chat_media_delivery(prompt))
+
+    def test_spanish_bring_photo_is_delivery(self):
+        from core.media_intent import (
+            is_chat_media_delivery,
+            is_image_generation_request,
+        )
+
+        for prompt in SPANISH_PHOTO_REQUESTS:
+            with self.subTest(prompt=prompt):
+                self.assertTrue(is_chat_media_delivery(prompt), prompt)
+                self.assertFalse(is_image_generation_request(prompt), prompt)
 
 
 class TestChatMediaPromptAndTools(unittest.TestCase):
@@ -289,6 +313,76 @@ class TestHostOwnedPhotoAttach(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(meta["image"], meta["attachments"][0]["url"])
         self.assertEqual(meta["attachments"][0]["kind"], "image")
         self.assertTrue(meta["attachments"][0]["url"].startswith("/temp/"))
+        self.assertTrue(toolbox.media_delivered_this_turn("turn_host"))
+
+    async def test_discord_host_attach_sends_file_without_wrapup(self):
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        from core.bus import MessageBus
+        from core.context import tool_context
+        from core.loop import AgentLoop
+        from core.tools import Toolbox
+        from core.web_search import ImageResult, SearchResponse
+
+        sent = []
+        bus = MessageBus()
+
+        async def _capture(msg):
+            sent.append(msg)
+
+        bus.publish_outbound = _capture
+        toolbox = Toolbox(
+            allowed_paths=[str(Path.cwd())],
+            bus=bus,
+            config=SimpleNamespace(skills=SimpleNamespace(enabled=[])),
+        )
+        loop = AgentLoop.__new__(AgentLoop)
+        loop.toolbox = toolbox
+
+        tmp_dir = Path("temp")
+        tmp_dir.mkdir(exist_ok=True)
+        tmp_file = tmp_dir / "host_jennie.jpg"
+        tmp_file.write_bytes(b"\xff\xd8\xff\xe0jpegdata")
+
+        async def fake_fetch(url, max_bytes=None):
+            self.assertEqual(url, "https://cdn.example.test/jennie-elle.jpg")
+            return str(tmp_file)
+
+        toolbox.fetch_url_to_temp = fake_fetch
+        response = SearchResponse(kind="images", query="Jennie ELLE Korea", provider="host")
+        response.images = [
+            ImageResult(
+                title="JENNIE for ELLE Korea",
+                image_url="https://cdn.example.test/jennie-elle.jpg",
+                source_page="https://elle.test/jennie",
+            )
+        ]
+        token = tool_context.set(
+            {
+                "channel": "discord",
+                "chat_id": "42",
+                "sender_id": "u1",
+                "turn_id": "turn_discord_photo",
+                "message_id": "msg_discord_photo",
+                "user_text": JENNIE_ELLE_REQUEST,
+            }
+        )
+        try:
+            await loop._maybe_host_attach_search_image(response, "Jennie ELLE Korea")
+        finally:
+            tool_context.reset(token)
+            tmp_file.unlink(missing_ok=True)
+
+        self.assertTrue(response.attached)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0].channel, "discord")
+        self.assertEqual(sent[0].metadata["type"], "file")
+        self.assertTrue(str(sent[0].metadata["file_path"]).endswith("host_jennie.jpg"))
+        self.assertEqual(sent[0].content, "")
+        self.assertTrue(toolbox.media_delivered_this_turn("turn_discord_photo"))
+        self.assertTrue(loop._turn_already_delivered_media("turn_discord_photo"))
+        self.assertNotIn("natural-language wrap-up", sent[0].content)
 
     def test_generate_image_turn_is_exclusive(self):
         from core.tool_defs import build_tool_definitions, shortlist_tool_definitions
@@ -307,6 +401,46 @@ class TestHostOwnedPhotoAttach(unittest.IsolatedAsyncioTestCase):
         selected = shortlist_tool_definitions(tools, ROSE_REQUEST, channel="discord")
         names = {tool["function"]["name"] for tool in selected}
         self.assertEqual(names, {"web_search", "send_media"})
+
+    def test_discord_spanish_photo_excludes_analyze_video(self):
+        from core.loop import AgentLoop
+        from core.tool_defs import build_tool_definitions, shortlist_tool_definitions
+
+        tools = build_tool_definitions(enabled_skills=["browser"])
+        selected = shortlist_tool_definitions(
+            tools, JENNIE_ELLE_REQUEST, channel="discord"
+        )
+        names = {tool["function"]["name"] for tool in selected}
+        self.assertIn("web_search", names)
+        self.assertNotIn("analyze_video", names)
+        self.assertNotIn("generate_image", names)
+
+        agent = object.__new__(AgentLoop)
+        agent.config = SimpleNamespace(tool_shortlist_enabled=False)
+        agent.skill_registry = SimpleNamespace(get_required_tool_names=lambda _name: [])
+        agent._get_tool_definitions = lambda: tools
+        agent._log_tool_debug = lambda *args, **kwargs: None
+
+        selected = agent._get_tool_definitions_for_turn(
+            JENNIE_ELLE_REQUEST, session_key="discord:42"
+        )
+        names = {tool["function"]["name"] for tool in selected}
+        self.assertIn("web_search", names)
+        self.assertNotIn("analyze_video", names)
+        self.assertNotIn("generate_image", names)
+        self.assertEqual(names, {"web_search", "send_media"})
+
+    def test_web_spanish_photo_does_not_register_send_media(self):
+        from core.tool_defs import build_tool_definitions, shortlist_tool_definitions
+
+        tools = build_tool_definitions(enabled_skills=["browser"])
+        selected = shortlist_tool_definitions(
+            tools, JENNIE_ELLE_REQUEST, channel="web"
+        )
+        names = {tool["function"]["name"] for tool in selected}
+        self.assertEqual(names, {"web_search"})
+        self.assertNotIn("send_media", names)
+        self.assertNotIn("analyze_video", names)
 
     def test_browser_surface_is_three_tools(self):
         from core.tool_defs import build_tool_definitions

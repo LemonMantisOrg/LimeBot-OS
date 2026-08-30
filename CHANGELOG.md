@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.15 - 2026-08-30
+### Fixed
+- Discord/WhatsApp photo-send: after `web_search(kind="images")` the host
+  downloads the best image and sends it as a file. Spanish tráeme / pásame /
+  mándame (and English bring/send/show me a photo) count as chat media delivery.
+- Photo-send turns no longer expose `analyze_video`, and an empty model wrap-up
+  no longer replaces a delivered photo with a tool-trace apology.
+
 ## 1.0.14 - 2026-08-26
 ### Changed
 - Host-owned `web_search(kind=web|news|images)`: the runtime fetches and parses

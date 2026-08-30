@@ -11,9 +11,10 @@ import re
 from typing import FrozenSet, Optional, Tuple
 
 _DELIVERY_VERBS = (
-    r"send|share|download|get|find|fetch|attach|look\s*up|look\s*for|"
-    r"busca(?:r)?|busque|env[ií]a(?:me|nos)?|mand[ae]|descarga(?:r)?|"
-    r"adjunt(?:a|ar)|muestra(?:me)?|show"
+    r"send|share|download|get|find|fetch|bring|attach|look\s*up|look\s*for|"
+    r"busca(?:r)?|busque|env[ií]a(?:me|nos)?|"
+    r"m[aá]nd[ae](?:me|nos)?|tr[aá]e(?:me|nos)?|p[aá]sa(?:me|nos)?|"
+    r"descarga(?:r)?|adjunt(?:a|ar)|muestra(?:me)?|show"
 )
 _IMAGE_NOUNS = (
     r"pic|pics|photo|photos|picture|pictures|image|images|"
