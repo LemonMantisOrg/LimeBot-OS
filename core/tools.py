@@ -3102,6 +3102,13 @@ class Toolbox:
             oldest_turn = next(iter(self._sent_media_by_turn))
             self._sent_media_by_turn.pop(oldest_turn, None)
 
+    def media_delivered_this_turn(self, turn_id: str) -> bool:
+        """True when host or send_media already delivered a file this turn."""
+        tid = str(turn_id or "").strip()
+        if not tid:
+            return False
+        return bool(self._sent_media_by_turn.get(tid))
+
     async def send_voice(self, text: str, channel: str = "") -> str:
         """Speak `text` aloud as a voice message in the current chat.
 

@@ -6140,6 +6140,12 @@ class AgentLoop:
             visible = format_invariant_next_action(verdict)
         return visible
 
+    def _turn_already_delivered_media(self, turn_id: Optional[str]) -> bool:
+        """True when a photo/file already went out for this turn."""
+        toolbox = getattr(self, "toolbox", None)
+        checker = getattr(toolbox, "media_delivered_this_turn", None)
+        return bool(callable(checker) and checker(turn_id))
+
     def _build_tool_fallback_reply(self, session_key: str, max_items: int = 2) -> str:
         errors = self._collect_turn_tool_errors(session_key)
         if errors:
@@ -9720,7 +9726,11 @@ class AgentLoop:
                             message_id=assistant_message_id,
                         )
 
-                    if tool_calls and not str(raw_reply or "").strip():
+                    if (
+                        tool_calls
+                        and not str(raw_reply or "").strip()
+                        and not self._turn_already_delivered_media(turn_id)
+                    ):
                         self._log_tool_debug(
                             "tool_fallback_inserted",
                             session_key=session_key,
@@ -9774,7 +9784,11 @@ class AgentLoop:
                         raw_reply = task_run_progress_reply
                         force_direct_reply = True
 
-                    if any_tool_calls_in_turn and not str(reply_to_user or "").strip():
+                    if (
+                        any_tool_calls_in_turn
+                        and not str(reply_to_user or "").strip()
+                        and not self._turn_already_delivered_media(turn_id)
+                    ):
                         self._log_tool_debug(
                             "tool_fallback_inserted",
                             session_key=session_key,
@@ -9790,7 +9804,11 @@ class AgentLoop:
                             )
                             self._mark_dirty(session_key)
                             fallback_inserted = True
-                    elif msg and not str(reply_to_user or "").strip():
+                    elif (
+                        msg
+                        and not str(reply_to_user or "").strip()
+                        and not self._turn_already_delivered_media(turn_id)
+                    ):
                         logger.warning(
                             "Empty user-visible reply after tag processing; sending fallback."
                         )
