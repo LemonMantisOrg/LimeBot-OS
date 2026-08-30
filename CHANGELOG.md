@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.16 - 2026-08-30
+### Fixed
+- After a successful `web_search(kind="images")` the host always downloads the
+  best image URL and delivers it (web envelope or Discord/WhatsApp file). Image
+  search results are the signal; delivery-verb lists are not the classifier.
+- Exclusive photo-send shortlist uses a photo noun (foto/photo/pic/picture/
+  image/imagen) and not generate/draw, instead of stacking more slang verbs.
+
 ## 1.0.15 - 2026-08-30
 ### Fixed
 - Discord/WhatsApp photo-send: after `web_search(kind="images")` the host

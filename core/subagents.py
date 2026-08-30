@@ -542,11 +542,9 @@ class SubagentRegistry:
         if not self.subagents:
             return ""
 
-        from core.media_intent import is_chat_media_delivery, is_image_generation_request
+        from core.media_intent import is_photo_lookup_request
 
-        if is_chat_media_delivery(current_message) and not is_image_generation_request(
-            current_message
-        ):
+        if is_photo_lookup_request(current_message):
             return ""
 
         lines = [

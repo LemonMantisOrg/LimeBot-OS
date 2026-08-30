@@ -500,9 +500,9 @@ class SkillRegistry:
         if not text:
             return sticky[:max_skills]
 
-        from core.media_intent import is_chat_media_delivery, is_image_generation_request
+        from core.media_intent import is_photo_lookup_request
 
-        if is_chat_media_delivery(text) and not is_image_generation_request(text):
+        if is_photo_lookup_request(text):
             # Native web_search(kind=images) plus host attach handles chat photos.
             return sticky[:max_skills]
 

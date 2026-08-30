@@ -22,8 +22,7 @@ from core.media_intent import (
     CHAT_MEDIA_SUPPORTING_TOOLS,
     CHAT_MEDIA_TOOLS,
     exclusive_tools_for_turn,
-    is_chat_media_delivery,
-    is_image_generation_request,
+    is_photo_lookup_request,
     is_write_and_run_request,
 )
 
@@ -1355,7 +1354,7 @@ def shortlist_tool_definitions(
     lowered = text.lower()
     tokens = _tokenize(text)
     selected_families = set()
-    media_delivery = is_chat_media_delivery(text) and not is_image_generation_request(text)
+    media_delivery = is_photo_lookup_request(text)
     write_and_run = is_write_and_run_request(text)
     if write_and_run:
         media_delivery = False
