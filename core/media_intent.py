@@ -1,8 +1,8 @@
 """Intent helpers for chat media delivery vs image generation.
 
-A request like "download a picture of X and send it in this chat" must route
-to host-owned ``web_search(kind="images")``. The host attaches the photo.
-``generate_image`` is only for newly created art.
+A successful ``web_search(kind="images")`` with at least one image URL is
+the host-delivery signal. The host attaches the photo. Verb lists are not
+the classifier. ``generate_image`` is only for newly created art.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ _IMAGE_NOUNS = (
     r"pic|pics|photo|photos|picture|pictures|image|images|"
     r"imagen(?:es)?|im[aá]genes|foto|fotos|wallpaper"
 )
+_IMAGE_NOUN_RE = re.compile(rf"\b(?:{_IMAGE_NOUNS})\b", re.IGNORECASE)
 _CREATE_VERBS = (
     r"generate|crear|crea|draw|render|paint|imagine|dall-?e|"
     r"make\s+(?:me\s+)?(?:an?\s+)?(?:new\s+)?|"
@@ -96,7 +97,11 @@ def is_image_generation_request(text: str) -> bool:
 
 
 def is_chat_media_delivery(text: str) -> bool:
-    """True when the user wants an existing photo/file delivered into chat."""
+    """Legacy verb+noun matcher. Not the host-attach gate.
+
+    Host delivery after ``web_search(kind="images")`` ignores this helper.
+    Exclusive tool shortlist uses ``is_photo_lookup_request`` (nouns only).
+    """
     blob = str(text or "").strip()
     if not blob or not _DELIVERY_RE.search(blob):
         return False
@@ -111,6 +116,18 @@ def is_chat_media_delivery(text: str) -> bool:
     return True
 
 
+def is_photo_lookup_request(text: str) -> bool:
+    """True when the text names an existing photo, not newly drawn art.
+
+    Nouns (foto/photo/pic/picture/image/imagen) are the exclusive-tool
+    signal. Do not grow a delivery-verb dictionary for this.
+    """
+    blob = str(text or "").strip()
+    if not blob or not _IMAGE_NOUN_RE.search(blob):
+        return False
+    return not is_image_generation_request(blob)
+
+
 def exclusive_tools_for_turn(
     text: str, channel: str = ""
 ) -> Optional[FrozenSet[str]]:
@@ -121,10 +138,9 @@ def exclusive_tools_for_turn(
     if is_write_and_run_request(blob):
         return None
     generation = is_image_generation_request(blob)
-    delivery = is_chat_media_delivery(blob)
-    if generation and not delivery:
+    if generation:
         return frozenset({"generate_image"})
-    if delivery and not generation:
+    if is_photo_lookup_request(blob):
         names = {"web_search"}
         # Discord/WhatsApp still expose send_media for non-web file share.
         # Web photo delivery is host-attached and must not register send_media.

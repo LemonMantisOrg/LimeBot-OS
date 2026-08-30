@@ -7,6 +7,11 @@ ROSE_REQUEST = (
     "download a picture of rose of blackpink for me and send me that in this chat"
 )
 JENNIE_ELLE_REQUEST = "traeme una foto de jennie de elle korea"
+# Noun-only prompts miss `_DELIVERY_VERBS` (no send/tráeme/pásame/…).
+NOUN_ONLY_PHOTO_REQUESTS = (
+    "una foto de jennie de elle korea",
+    "jennie elle korea photo",
+)
 SPANISH_PHOTO_REQUESTS = (
     JENNIE_ELLE_REQUEST,
     "tráeme una foto",
@@ -45,11 +50,26 @@ class TestChatMediaIntent(unittest.TestCase):
         from core.media_intent import (
             is_chat_media_delivery,
             is_image_generation_request,
+            is_photo_lookup_request,
         )
 
         for prompt in SPANISH_PHOTO_REQUESTS:
             with self.subTest(prompt=prompt):
                 self.assertTrue(is_chat_media_delivery(prompt), prompt)
+                self.assertTrue(is_photo_lookup_request(prompt), prompt)
+                self.assertFalse(is_image_generation_request(prompt), prompt)
+
+    def test_noun_only_photo_misses_delivery_verbs(self):
+        from core.media_intent import (
+            is_chat_media_delivery,
+            is_image_generation_request,
+            is_photo_lookup_request,
+        )
+
+        for prompt in NOUN_ONLY_PHOTO_REQUESTS:
+            with self.subTest(prompt=prompt):
+                self.assertFalse(is_chat_media_delivery(prompt), prompt)
+                self.assertTrue(is_photo_lookup_request(prompt), prompt)
                 self.assertFalse(is_image_generation_request(prompt), prompt)
 
 
@@ -384,6 +404,155 @@ class TestHostOwnedPhotoAttach(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(loop._turn_already_delivered_media("turn_discord_photo"))
         self.assertNotIn("natural-language wrap-up", sent[0].content)
 
+    async def test_discord_host_attach_does_not_use_delivery_verbs(self):
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        from core.bus import MessageBus
+        from core.context import tool_context
+        from core.loop import AgentLoop
+        from core.media_intent import is_chat_media_delivery
+        from core.tools import Toolbox
+        from core.web_search import ImageResult, SearchResponse
+
+        for prompt in NOUN_ONLY_PHOTO_REQUESTS:
+            with self.subTest(prompt=prompt):
+                self.assertFalse(is_chat_media_delivery(prompt), prompt)
+
+                sent = []
+                bus = MessageBus()
+
+                async def _capture(msg):
+                    sent.append(msg)
+
+                bus.publish_outbound = _capture
+                toolbox = Toolbox(
+                    allowed_paths=[str(Path.cwd())],
+                    bus=bus,
+                    config=SimpleNamespace(skills=SimpleNamespace(enabled=[])),
+                )
+                loop = AgentLoop.__new__(AgentLoop)
+                loop.toolbox = toolbox
+
+                tmp_dir = Path("temp")
+                tmp_dir.mkdir(exist_ok=True)
+                tmp_file = tmp_dir / "host_jennie_noun.jpg"
+                tmp_file.write_bytes(b"\xff\xd8\xff\xe0jpegdata")
+
+                async def fake_fetch(url, max_bytes=None):
+                    self.assertEqual(url, "https://cdn.example.test/jennie-elle.jpg")
+                    return str(tmp_file)
+
+                toolbox.fetch_url_to_temp = fake_fetch
+                response = SearchResponse(
+                    kind="images", query="Jennie ELLE Korea", provider="host"
+                )
+                response.images = [
+                    ImageResult(
+                        title="JENNIE for ELLE Korea",
+                        image_url="https://cdn.example.test/jennie-elle.jpg",
+                        source_page="https://elle.test/jennie",
+                    )
+                ]
+                turn_id = "turn_discord_noun"
+                token = tool_context.set(
+                    {
+                        "channel": "discord",
+                        "chat_id": "42",
+                        "sender_id": "u1",
+                        "turn_id": turn_id,
+                        "message_id": "msg_discord_noun",
+                        "user_text": prompt,
+                    }
+                )
+                try:
+                    await loop._maybe_host_attach_search_image(
+                        response, "Jennie ELLE Korea"
+                    )
+                finally:
+                    tool_context.reset(token)
+                    tmp_file.unlink(missing_ok=True)
+
+                self.assertTrue(response.attached, prompt)
+                self.assertEqual(len(sent), 1, prompt)
+                self.assertEqual(sent[0].channel, "discord")
+                self.assertEqual(sent[0].metadata["type"], "file")
+                self.assertTrue(
+                    str(sent[0].metadata["file_path"]).endswith("host_jennie_noun.jpg")
+                )
+                self.assertTrue(toolbox.media_delivered_this_turn(turn_id))
+                self.assertTrue(loop._turn_already_delivered_media(turn_id))
+                self.assertNotIn("natural-language wrap-up", sent[0].content)
+
+    async def test_web_host_attach_stamps_image_without_send_media(self):
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        from core.bus import MessageBus
+        from core.context import tool_context
+        from core.loop import AgentLoop
+        from core.tools import Toolbox
+        from core.web_search import ImageResult, SearchResponse
+
+        prompt = NOUN_ONLY_PHOTO_REQUESTS[0]
+        sent = []
+        bus = MessageBus()
+
+        async def _capture(msg):
+            sent.append(msg)
+
+        bus.publish_outbound = _capture
+        toolbox = Toolbox(
+            allowed_paths=[str(Path.cwd())],
+            bus=bus,
+            config=SimpleNamespace(skills=SimpleNamespace(enabled=[])),
+        )
+        loop = AgentLoop.__new__(AgentLoop)
+        loop.toolbox = toolbox
+
+        tmp_dir = Path("temp")
+        tmp_dir.mkdir(exist_ok=True)
+        tmp_file = tmp_dir / "host_jennie_web.png"
+        tmp_file.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+
+        async def fake_fetch(url, max_bytes=None):
+            return str(tmp_file)
+
+        toolbox.fetch_url_to_temp = fake_fetch
+        response = SearchResponse(
+            kind="images", query="Jennie ELLE Korea", provider="host"
+        )
+        response.images = [
+            ImageResult(
+                title="JENNIE for ELLE Korea",
+                image_url="https://cdn.example.test/jennie-elle.jpg",
+                source_page="https://elle.test/jennie",
+            )
+        ]
+        token = tool_context.set(
+            {
+                "channel": "web",
+                "chat_id": "dash",
+                "sender_id": "u1",
+                "turn_id": "turn_web_noun",
+                "message_id": "msg_web_noun",
+                "user_text": prompt,
+            }
+        )
+        try:
+            await loop._maybe_host_attach_search_image(response, "Jennie ELLE Korea")
+        finally:
+            tool_context.reset(token)
+            tmp_file.unlink(missing_ok=True)
+
+        self.assertTrue(response.attached)
+        self.assertEqual(len(sent), 1)
+        meta = sent[0].metadata
+        self.assertEqual(meta["image"], meta["attachments"][0]["url"])
+        self.assertEqual(meta["attachments"][0]["kind"], "image")
+        self.assertTrue(meta["attachments"][0]["url"].startswith("/temp/"))
+        self.assertTrue(toolbox.media_delivered_this_turn("turn_web_noun"))
+
     def test_generate_image_turn_is_exclusive(self):
         from core.tool_defs import build_tool_definitions, shortlist_tool_definitions
 
@@ -398,9 +567,13 @@ class TestHostOwnedPhotoAttach(unittest.IsolatedAsyncioTestCase):
         from core.tool_defs import build_tool_definitions, shortlist_tool_definitions
 
         tools = build_tool_definitions(enabled_skills=["browser"])
-        selected = shortlist_tool_definitions(tools, ROSE_REQUEST, channel="discord")
-        names = {tool["function"]["name"] for tool in selected}
-        self.assertEqual(names, {"web_search", "send_media"})
+        for prompt in (ROSE_REQUEST, JENNIE_ELLE_REQUEST, *NOUN_ONLY_PHOTO_REQUESTS):
+            with self.subTest(prompt=prompt):
+                selected = shortlist_tool_definitions(
+                    tools, prompt, channel="discord"
+                )
+                names = {tool["function"]["name"] for tool in selected}
+                self.assertEqual(names, {"web_search", "send_media"})
 
     def test_discord_spanish_photo_excludes_analyze_video(self):
         from core.loop import AgentLoop
@@ -434,13 +607,13 @@ class TestHostOwnedPhotoAttach(unittest.IsolatedAsyncioTestCase):
         from core.tool_defs import build_tool_definitions, shortlist_tool_definitions
 
         tools = build_tool_definitions(enabled_skills=["browser"])
-        selected = shortlist_tool_definitions(
-            tools, JENNIE_ELLE_REQUEST, channel="web"
-        )
-        names = {tool["function"]["name"] for tool in selected}
-        self.assertEqual(names, {"web_search"})
-        self.assertNotIn("send_media", names)
-        self.assertNotIn("analyze_video", names)
+        for prompt in (JENNIE_ELLE_REQUEST, *NOUN_ONLY_PHOTO_REQUESTS):
+            with self.subTest(prompt=prompt):
+                selected = shortlist_tool_definitions(tools, prompt, channel="web")
+                names = {tool["function"]["name"] for tool in selected}
+                self.assertEqual(names, {"web_search"})
+                self.assertNotIn("send_media", names)
+                self.assertNotIn("analyze_video", names)
 
     def test_browser_surface_is_three_tools(self):
         from core.tool_defs import build_tool_definitions

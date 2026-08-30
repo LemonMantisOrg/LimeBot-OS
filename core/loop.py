@@ -1930,11 +1930,9 @@ class AgentLoop:
             session_key, current_message
         )
         routing_text = capability_context.get("routing_text") or current_message
-        from core.media_intent import is_chat_media_delivery, is_image_generation_request
+        from core.media_intent import is_photo_lookup_request
 
-        media_delivery_turn = is_chat_media_delivery(
-            routing_text
-        ) and not is_image_generation_request(routing_text)
+        media_delivery_turn = is_photo_lookup_request(routing_text)
         if forced_skill_name:
             skills_docs = self.skill_registry.get_forced_prompt_addition(
                 forced_skill_name
@@ -4832,18 +4830,27 @@ class AgentLoop:
         return format_search_response(response)
 
     async def _maybe_host_attach_search_image(self, response, query: str) -> None:
-        """On media-delivery turns, the host attaches the best image itself."""
-        from core.context import tool_context
-        from core.media_intent import is_chat_media_delivery, is_image_generation_request
+        """After a successful image search, deliver the best hit.
 
-        if getattr(response, "kind", "") != "images" or not getattr(response, "images", None):
+        ``kind="images"`` plus at least one image URL is the signal. Do not
+        consult delivery-verb matchers; the model already chose image search.
+        """
+        if getattr(response, "kind", "") != "images":
             return
-        ctx = tool_context.get() or {}
-        user_text = str(ctx.get("user_text") or query or "")
-        if not is_chat_media_delivery(user_text) or is_image_generation_request(user_text):
+        if getattr(response, "attached", False):
             return
-        image = response.images[0]
-        caption = str(image.title or query or "").strip()
+        images = getattr(response, "images", None) or ()
+        image = next(
+            (
+                item
+                for item in images
+                if str(getattr(item, "image_url", "") or "").strip()
+            ),
+            None,
+        )
+        if image is None:
+            return
+        caption = str(getattr(image, "title", "") or query or "").strip()
         try:
             result = await self.toolbox.attach_chat_image(image.image_url, caption)
         except Exception as exc:

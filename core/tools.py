@@ -3089,8 +3089,8 @@ class Toolbox:
     async def attach_chat_image(self, image_url: str, caption: str = "") -> str:
         """Host-owned download + stamp of an existing photo into the current chat.
 
-        Used after web_search(kind='images') on a media-delivery turn. Not a
-        model-facing tool.
+        Used after web_search(kind='images') whenever a hit has an image URL.
+        Not a model-facing tool. Verb lists do not gate this path.
         """
         return await self.send_media(image_url, caption)
 
