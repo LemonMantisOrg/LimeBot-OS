@@ -104,6 +104,7 @@ class Toolbox:
         # through one response. Captions are intentionally excluded from the
         # fingerprint because changing narration must not bypass the guard.
         self._sent_media_by_turn: Dict[str, set[str]] = {}
+        self._instagram_by_turn: Dict[tuple, Any] = {}
 
         if allowed_paths:
             for p in allowed_paths:
@@ -2786,7 +2787,7 @@ class Toolbox:
         return True, ""
 
     async def _safe_fetch(
-        self, url: str, *, max_bytes: int, timeout: float
+        self, url: str, *, max_bytes: int, timeout: float, extra_headers: Optional[Dict[str, str]] = None
     ) -> tuple[str, str, bytes]:
         """Fetch a URL, validating every redirect hop against the SSRF guard.
 
@@ -2804,6 +2805,8 @@ class Toolbox:
             "Accept-Language": "en-US,en;q=0.9",
             "Referer": "https://www.google.com/",
         }
+        if extra_headers:
+            headers.update({str(k): str(v) for k, v in extra_headers.items() if v})
         current = url
         async with httpx.AsyncClient(
             timeout=timeout, follow_redirects=False, headers=headers
@@ -2861,7 +2864,13 @@ class Toolbox:
         return ".bin"
 
     async def fetch_url_to_temp(
-        self, url: str, max_bytes: int = _MAX_DOWNLOAD_BYTES
+        self,
+        url: str,
+        max_bytes: int = _MAX_DOWNLOAD_BYTES,
+        *,
+        referer: str = "",
+        user_agent: str = "",
+        extra_headers: Optional[Dict[str, str]] = None,
     ) -> str:
         """Download a public http(s) URL into temp/downloads and return its path."""
         url = str(url or "").strip()
@@ -2876,9 +2885,14 @@ class Toolbox:
         except Exception as e:
             return f"Error: Could not create download directory: {e}"
 
+        headers: Dict[str, str] = dict(extra_headers or {})
+        if referer:
+            headers["Referer"] = referer
+        if user_agent:
+            headers["User-Agent"] = user_agent
         try:
             final_url, content_type, data = await self._safe_fetch(
-                url, max_bytes=max_bytes, timeout=30.0
+                url, max_bytes=max_bytes, timeout=30.0, extra_headers=headers or None
             )
         except ValueError as e:
             return f"Error: {e}"
@@ -3025,6 +3039,11 @@ class Toolbox:
         if not source:
             return "Error: A local file path or http(s) URL is required."
 
+        from core.instagram import is_instagram_post_url
+
+        if is_instagram_post_url(source):
+            return await self.deliver_instagram_post_photos(source, caption)
+
         turn_id = str(ctx.get("turn_id") or "").strip()
         if source.lower().startswith(("http://", "https://")):
             media_fingerprint = source
@@ -3093,6 +3112,71 @@ class Toolbox:
         model-facing tool.
         """
         return await self.send_media(image_url, caption)
+
+    async def _fetch_instagram_carousel(self, shortcode: str):
+        from core.instagram import fetch_carousel_stills
+
+        async def fetch_bytes(url, headers=None):
+            _final, _ctype, data = await self._safe_fetch(
+                url,
+                max_bytes=_MAX_DOWNLOAD_BYTES,
+                timeout=30.0,
+                extra_headers=dict(headers or {}),
+            )
+            return data
+
+        dest_dir = self.allowed_paths[0] / "temp" / "instagram" / str(shortcode)
+
+        async def save_still(index, data, url):
+            await asyncio.to_thread(lambda: dest_dir.mkdir(parents=True, exist_ok=True))
+            ext = self._guess_download_extension(data, "image/jpeg", url)
+            dest = dest_dir / f"slide_{index}{ext}"
+            await asyncio.to_thread(dest.write_bytes, data)
+            return self._to_display_path(dest)
+
+        return await fetch_carousel_stills(
+            shortcode, fetch_bytes=fetch_bytes, save_still=save_still
+        )
+
+    async def deliver_instagram_post_photos(self, source: str, caption: str = "") -> str:
+        """Fetch public embed sidecar stills and send_media each photo.
+
+        Not a model-facing tool. Playwright failure is not a reason to skip this.
+        """
+        from core.context import tool_context
+        from core.instagram import instagram_shortcodes
+
+        codes = instagram_shortcodes(source)
+        if not codes:
+            return "Error: No Instagram post/reel shortcode found."
+        shortcode = codes[0]
+        turn_id = str((tool_context.get() or {}).get("turn_id") or "")
+        cache_key = (turn_id, shortcode)
+        cached = self._instagram_by_turn.get(cache_key)
+        if cached is not None and getattr(cached, "photo_paths", None):
+            carousel = cached
+        else:
+            carousel = await self._fetch_instagram_carousel(shortcode)
+            self._instagram_by_turn[cache_key] = carousel
+        if carousel.error and not carousel.photo_paths:
+            return carousel.error
+        if not carousel.photo_paths:
+            return (
+                f"Instagram post {shortcode} has {carousel.video_count} video slide(s) "
+                "and no still photos to send. og:image is not the carousel."
+            )
+        results = []
+        for index, photo_path in enumerate(carousel.photo_paths):
+            cap = caption if index == 0 else ""
+            results.append(await self.send_media(photo_path, cap))
+        sent = sum(
+            1 for item in results if item and not str(item).startswith("Error:")
+        )
+        return (
+            f"Sent {sent} Instagram photo(s) from {shortcode} "
+            f"({carousel.video_count} video slide(s) skipped). "
+            "og:image is not the carousel."
+        )
 
     def _remember_sent_media(self, turn_id: str, fingerprint: str) -> None:
         """Remember successful media deliveries without growing forever."""

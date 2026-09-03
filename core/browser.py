@@ -36,6 +36,56 @@ BROWSER_INSTALL_HINT = (
     " (or: npm run lime-bot feature install browser && npm run install-browser)."
 )
 
+BROWSER_LAUNCH_FAILED_ERROR = (
+    "Error: Browser failed to launch. Do not retry browser_navigate. "
+    "This does not block send_media."
+)
+
+_LAUNCH_FAIL_MARKERS = (
+    "launch_persistent_context",
+    "Target page, context or browser has been closed",
+    "Failed to start browser",
+    "BrowserType.launch",
+)
+
+_PLAYWRIGHT_LAUNCH_DEAD = False
+
+
+def playwright_is_launch_dead() -> bool:
+    """True after this process already failed to start Chromium."""
+    return _PLAYWRIGHT_LAUNCH_DEAD
+
+
+def mark_playwright_launch_dead() -> None:
+    """Remember that Playwright launch is dead for this process."""
+    global _PLAYWRIGHT_LAUNCH_DEAD
+    _PLAYWRIGHT_LAUNCH_DEAD = True
+
+
+def reset_playwright_launch_dead() -> None:
+    """Test helper: allow a later launch attempt."""
+    global _PLAYWRIGHT_LAUNCH_DEAD
+    _PLAYWRIGHT_LAUNCH_DEAD = False
+
+
+def playwright_launch_dead_error() -> Optional[str]:
+    if not _PLAYWRIGHT_LAUNCH_DEAD:
+        return None
+    return BROWSER_LAUNCH_FAILED_ERROR
+
+
+def is_browser_launch_failure(error: BaseException) -> bool:
+    text = str(error)
+    return any(marker in text for marker in _LAUNCH_FAIL_MARKERS)
+
+
+def compact_browser_launch_error(error: BaseException) -> Optional[str]:
+    """One-line Error for Chromium launch failures; never dump chrome flags."""
+    if not is_browser_launch_failure(error):
+        return None
+    mark_playwright_launch_dead()
+    return BROWSER_LAUNCH_FAILED_ERROR
+
 
 def compact_html_tables(html: str, max_chars: int = 1500) -> str:
     """Turn HTML tables into compact pipe rows so release tables survive truncation."""
