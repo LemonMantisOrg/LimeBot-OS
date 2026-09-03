@@ -154,7 +154,7 @@ Sandboxed OS interface. All methods check `_is_path_allowed()` before touching t
 - Hard-blocked filenames: `.env`, `limebot.json`, `config.py`, `secrets.py`, `package-lock.json`
 - Hard-blocked extensions: `.pem`, `.key`, `.p12`, `.pfx`
 - `.env*` prefix is blocked by pattern regardless of rest of filename
-- Host capability gate (`core/tool_capability.py`, via `preflight_tool_call`) refuses `read_file` on jpeg/png/gif/webp and `browser_navigate` to image URLs before execute. Chat-attached images are injected into vision and are not offered as filesystem reads.
+- Host capability gate (`core/tool_capability.py`, via `preflight_tool_call`) refuses `read_file` on jpeg/png/gif/webp, `browser_navigate` to image URLs, and Instagram photo-download `browser_navigate`/`run_command` curl before execute. Chat-attached images are injected into vision and are not offered as filesystem reads. Public Instagram carousels are fetched from `/p/{shortcode}/embed/captioned/` (`core/instagram.py`) and delivered with `send_media`; a Playwright launch failure is a one-line Error and does not skip that send.
 
 **Available tools:**
 

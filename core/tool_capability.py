@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Sequence
 from urllib.parse import unquote, urlparse
 
-from core.media_intent import is_write_and_run_request
+from core.media_intent import is_instagram_photo_send, is_write_and_run_request
 
 
 IMAGE_FILE_EXTENSIONS: FrozenSet[str] = frozenset(
@@ -61,6 +61,23 @@ IMAGE_INSPECTION_BLOCKED_TOOLS: FrozenSet[str] = frozenset(
         "read_file",
         "browser_navigate",
     }
+)
+
+# Nearby-wrong way to "see" an Instagram carousel on a download/send turn.
+INSTAGRAM_PHOTO_BLOCKED_TOOLS: FrozenSet[str] = frozenset(
+    {
+        "browser_navigate",
+        "browser_act",
+        "browser_extract",
+        "run_command",
+        "run_steps",
+        "web_search",
+    }
+)
+
+_INSTAGRAM_POST_CMD_RE = re.compile(
+    r"instagram\.com/(?:p|reel|reels)/",
+    re.IGNORECASE,
 )
 
 _URL_RE = re.compile(r"https?://[^\s<>\"')\]]+", re.IGNORECASE)
@@ -320,15 +337,56 @@ def refuse_browser_navigate_image(
     )
 
 
+def refuse_instagram_photo_tools(
+    function_name: str,
+    function_args: Optional[Dict[str, Any]] = None,
+    *,
+    user_text: str = "",
+) -> Optional[str]:
+    """Refuse browser/curl as the way to download an Instagram carousel."""
+    if not is_instagram_photo_send(user_text):
+        return None
+    name = str(function_name or "").strip()
+    args = dict(function_args or {})
+    from core.instagram import is_instagram_post_url
+
+    if name in {"browser_navigate", "browser_act", "browser_extract"}:
+        url = str(args.get("url") or args.get("path") or args.get("href") or "").strip()
+        if name != "browser_navigate" or is_instagram_post_url(url) or not url:
+            return (
+                "Error: browser_navigate cannot open Instagram posts to download "
+                "photos. The host fetches /p/{shortcode}/embed/captioned/ sidecar "
+                "stills. Call send_media. A browser launch failure does not block "
+                "send_media."
+            )
+    if name in {"run_command", "run_steps"}:
+        command = str(args.get("command") or "")
+        commands = args.get("commands") or []
+        blob = command + " " + " ".join(str(item) for item in commands)
+        if _INSTAGRAM_POST_CMD_RE.search(blob):
+            return (
+                "Error: Do not curl Instagram post HTML. og:image is one video "
+                "thumbnail, not the carousel. The host fetches the public embed "
+                "sidecar and send_media delivers the stills."
+            )
+    return None
+
+
 def refuse_illegal_tool_call(
     function_name: str,
     function_args: Optional[Dict[str, Any]] = None,
     *,
     attachments: Optional[Iterable[Any]] = None,
+    user_text: str = "",
 ) -> Optional[str]:
     """Return a recoverable Error string, or None if the host may execute."""
     name = str(function_name or "").strip()
     args = dict(function_args or {})
+    instagram_refusal = refuse_instagram_photo_tools(
+        name, args, user_text=user_text
+    )
+    if instagram_refusal:
+        return instagram_refusal
     if name == "read_file":
         path = str(
             args.get("path") or args.get("file") or args.get("filename") or ""
@@ -364,6 +422,13 @@ def hidden_tools_for_image_attachments(
     return frozenset(hidden)
 
 
+def hidden_tools_for_instagram_photo_send(text: str = "") -> FrozenSet[str]:
+    """Hide browser/curl on an Instagram photo-download/send turn."""
+    if not is_instagram_photo_send(text):
+        return frozenset()
+    return INSTAGRAM_PHOTO_BLOCKED_TOOLS
+
+
 def filter_tools_for_image_attachments(
     tool_defs: Sequence[Dict[str, Any]],
     text: str = "",
@@ -378,3 +443,17 @@ def filter_tools_for_image_attachments(
         if str(tool.get("function", {}).get("name") or "") not in hidden
     ]
     return filtered or list(tool_defs)
+
+
+def filter_tools_for_instagram_photo_send(
+    tool_defs: Sequence[Dict[str, Any]],
+    text: str = "",
+) -> List[Dict[str, Any]]:
+    hidden = hidden_tools_for_instagram_photo_send(text)
+    if not hidden:
+        return list(tool_defs)
+    return [
+        tool
+        for tool in tool_defs
+        if str(tool.get("function", {}).get("name") or "") not in hidden
+    ]

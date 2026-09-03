@@ -11,9 +11,12 @@ import re
 from typing import FrozenSet, Optional, Tuple
 
 _DELIVERY_VERBS = (
-    r"send|share|download|get|find|fetch|bring|attach|look\s*up|look\s*for|"
-    r"busca(?:r)?|busque|env[ií]a(?:me|nos)?|"
-    r"m[aá]nd[ae](?:me|nos)?|tr[aá]e(?:me|nos)?|p[aá]sa(?:me|nos)?|"
+    r"send|share|download|get|find|fetch|bring|attach|forward|look\s*up|look\s*for|"
+    r"busca(?:r)?|busque|env[ií]a(?:me|nos|melas|noslas|las|los)?|"
+    r"m[aá]nd[ae](?:me|nos|melas|noslas|las|los)?|"
+    r"tr[aá]e(?:me|nos|melas|noslas|las|los)?|"
+    r"p[aá]sa(?:me|nos|melas|noslas|las|los)?|"
+    r"baja(?:me|nos|melas|noslas|las|los)?|"
     r"descarga(?:r)?|adjunt(?:a|ar)|muestra(?:me)?|show"
 )
 _IMAGE_NOUNS = (
@@ -77,6 +80,11 @@ MEDIA_DELIVERY_RULES = (
     "best image and attaches it to the chat. Do not call `send_media`, "
     "`generate_image`, `spawn_agent`, `run_command`, or any browser tool. "
     "Do not open a search engine yourself.\n"
+    "If they named an instagram.com/p/ or /reel/ URL and asked to download/"
+    "send/forward those photos, do not call browser_navigate, browser_act, "
+    "run_command, or web_search. Call `send_media`. The host fetches the public "
+    "embed sidecar stills and attaches them. A browser launch failure does not "
+    "block send_media.\n"
     "Do NOT call `generate_image` unless they asked to create, draw, render, or "
     "transform a NEW picture. Finding or downloading an existing photo is not "
     "image generation.\n"
@@ -101,7 +109,7 @@ def is_chat_media_delivery(text: str) -> bool:
     if not blob or not _DELIVERY_RE.search(blob):
         return False
     if is_image_generation_request(blob) and not re.search(
-        r"\b(?:download|find|fetch|busca(?:r)?|descarga(?:r)?)\b",
+        r"\b(?:download|find|fetch|busca(?:r)?|descarga(?:r)?|baja(?:me|nos)?)\b",
         blob,
         re.IGNORECASE,
     ):
@@ -109,6 +117,18 @@ def is_chat_media_delivery(text: str) -> bool:
         # delivers. Fetch-and-send stays for download/find phrasing.
         return False
     return True
+
+
+def is_instagram_photo_send(text: str) -> bool:
+    """True when the user named an IG post/reel and asked to send its photos."""
+    from core.instagram import instagram_shortcodes
+
+    blob = str(text or "").strip()
+    if not blob or not instagram_shortcodes(blob):
+        return False
+    if is_image_generation_request(blob) and not is_chat_media_delivery(blob):
+        return False
+    return is_chat_media_delivery(blob)
 
 
 def exclusive_tools_for_turn(
@@ -120,13 +140,16 @@ def exclusive_tools_for_turn(
         return None
     if is_write_and_run_request(blob):
         return None
+    if is_instagram_photo_send(blob):
+        # Host fetches the public embed sidecar. Browser/curl cannot "see" it.
+        return frozenset({"send_media"})
     generation = is_image_generation_request(blob)
     delivery = is_chat_media_delivery(blob)
     if generation and not delivery:
         return frozenset({"generate_image"})
     if delivery and not generation:
         names = {"web_search"}
-        # Discord/WhatsApp still expose send_media for non-web file share.
+        # Discord/WhatsApp still expose send_media for leftover file share.
         # Web photo delivery is host-attached and must not register send_media.
         if str(channel or "").strip().lower() in {"discord", "whatsapp"}:
             names.add("send_media")

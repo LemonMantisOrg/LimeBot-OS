@@ -118,6 +118,7 @@ from core.tag_parser import process_tags
 from core.media_intent import exclusive_tools_for_turn
 from core.tool_capability import (
     filter_tools_for_image_attachments,
+    filter_tools_for_instagram_photo_send,
     strip_image_urls,
 )
 from core.tool_defs import shortlist_tool_definitions
@@ -897,6 +898,7 @@ class AgentLoop:
         selected = filter_tools_for_image_attachments(
             selected, user_text, attachments
         )
+        selected = filter_tools_for_instagram_photo_send(selected, user_text)
 
         all_names = self._tool_definition_names(all_tools)
         selected_names = self._tool_definition_names(selected)
@@ -4637,6 +4639,16 @@ class AgentLoop:
     async def _execute_browser_tool(
         self, function_name: str, args: Dict[str, Any], session_key: str
     ) -> Any:
+        from core.browser import (
+            BROWSER_INSTALL_HINT,
+            PLAYWRIGHT_AVAILABLE,
+            compact_browser_launch_error,
+            playwright_launch_dead_error,
+        )
+
+        dead = playwright_launch_dead_error()
+        if dead:
+            return dead
         try:
             browser = await get_browser_manager(
                 session_key=session_key, config=self.config
@@ -4722,6 +4734,12 @@ class AgentLoop:
         except Exception as e:
             from core.browser import BROWSER_INSTALL_HINT, PLAYWRIGHT_AVAILABLE
 
+            compact = compact_browser_launch_error(e)
+            if compact:
+                logger.warning(
+                    "Browser launch failed; returning a one-line error without chrome flags."
+                )
+                return compact
             if not PLAYWRIGHT_AVAILABLE or BROWSER_INSTALL_HINT in str(e):
                 return f"Error: {BROWSER_INSTALL_HINT}"
             logger.exception(
@@ -4874,6 +4892,53 @@ class AgentLoop:
             logger.warning(f"Host image attach failed: {result}")
             return
         response.attached = True
+
+    async def _maybe_host_deliver_instagram_photos(
+        self,
+        msg,
+        content: str,
+        *,
+        turn_id: Optional[str] = None,
+        message_id: Optional[str] = None,
+    ) -> None:
+        """After an IG photo-send turn, attach sidecar stills via send_media."""
+        from core.context import tool_context
+        from core.media_intent import is_instagram_photo_send
+
+        if msg is None or not is_instagram_photo_send(content or getattr(msg, "content", "")):
+            return
+        if self._turn_already_delivered_media(turn_id):
+            return
+        toolbox = getattr(self, "toolbox", None)
+        deliver = getattr(toolbox, "deliver_instagram_post_photos", None)
+        if not callable(deliver):
+            return
+        token = tool_context.set(
+            {
+                "channel": getattr(msg, "channel", "") or "",
+                "chat_id": getattr(msg, "chat_id", "") or "",
+                "sender_id": getattr(msg, "sender_id", "") or "",
+                "turn_id": turn_id or "",
+                "message_id": message_id or "",
+                "user_text": str(content or getattr(msg, "content", "") or "")[:4000],
+                "attachments": list(
+                    getattr(self, "_turn_attachments", {}).get(
+                        f"{getattr(msg, 'channel', '')}:{getattr(msg, 'chat_id', '')}",
+                        [],
+                    )
+                    or []
+                ),
+            }
+        )
+        try:
+            result = await deliver(str(content or getattr(msg, "content", "") or ""))
+        except Exception as exc:
+            logger.warning(f"Host Instagram photo delivery failed: {exc}")
+            return
+        finally:
+            tool_context.reset(token)
+        if str(result or "").startswith("Error:"):
+            logger.warning(f"Host Instagram photo delivery failed: {result}")
 
     async def _run_deep_research(
         self, query: str, args: Dict[str, Any], session_key: str
@@ -5293,6 +5358,7 @@ class AgentLoop:
             function_args,
             attachments=ctx.get("attachments")
             or getattr(self, "_turn_attachments", {}).get(session_key),
+            user_text=str(ctx.get("user_text") or ""),
         )
         if refusal:
             return refusal
@@ -9611,6 +9677,13 @@ class AgentLoop:
                             )
                     else:
                         raw_reply = full_content
+
+                    await self._maybe_host_deliver_instagram_photos(
+                        msg,
+                        content,
+                        turn_id=turn_id,
+                        message_id=assistant_message_id,
+                    )
 
                     operator_verdict = self._evaluate_operator_invariants(
                         session_key=session_key,

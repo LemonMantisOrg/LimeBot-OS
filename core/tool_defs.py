@@ -1343,6 +1343,7 @@ def shortlist_tool_definitions(
 ) -> List[Dict[str, Any]]:
     """Return a coherent subset of tools for the current user turn."""
     from core.tool_capability import filter_tools_for_image_attachments
+    from core.tool_capability import filter_tools_for_instagram_photo_send
 
     text = (user_text or "").strip()
     exclusive = exclusive_tools_for_turn(text, channel=channel)
@@ -1352,9 +1353,10 @@ def shortlist_tool_definitions(
             for tool in tool_defs
             if str(tool.get("function", {}).get("name") or "") in exclusive
         ]
-        return filter_tools_for_image_attachments(
+        selected = filter_tools_for_image_attachments(
             filtered or tool_defs, text, attachments
         )
+        return filter_tools_for_instagram_photo_send(selected, text)
 
     if not text or len(tool_defs) <= max_tools:
         return tool_defs
@@ -1531,8 +1533,11 @@ def shortlist_tool_definitions(
     shortlisted = [
         tool for tool in tool_defs if tool.get("function", {}).get("name") in selected_set
     ]
-    return filter_tools_for_image_attachments(
-        shortlisted or tool_defs, text, attachments
+    return filter_tools_for_instagram_photo_send(
+        filter_tools_for_image_attachments(
+            shortlisted or tool_defs, text, attachments
+        ),
+        text,
     )
 
 

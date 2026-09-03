@@ -394,6 +394,7 @@ def preflight_tool_call(
     function_args: Optional[dict] = None,
     *,
     attachments: Optional[Iterable[Any]] = None,
+    user_text: str = "",
 ) -> Optional[str]:
     """Refuse illegal tool/arg combos before any handler runs.
 
@@ -402,5 +403,8 @@ def preflight_tool_call(
     from core.tool_capability import refuse_illegal_tool_call
 
     return refuse_illegal_tool_call(
-        function_name, function_args, attachments=attachments
+        function_name,
+        function_args,
+        attachments=attachments,
+        user_text=user_text,
     )
