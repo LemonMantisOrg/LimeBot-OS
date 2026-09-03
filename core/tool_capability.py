@@ -378,16 +378,3 @@ def filter_tools_for_image_attachments(
         if str(tool.get("function", {}).get("name") or "") not in hidden
     ]
     return filtered or list(tool_defs)
-
-
-def image_attachment_note(name: str, mime_type: str = "") -> str:
-    """Host-authored image note that does not offer a filesystem path."""
-    label = str(name or "image").strip() or "image"
-    note = f"[Attached image: {label}]"
-    if mime_type:
-        note += f" Type: {mime_type}."
-    note += (
-        " Already available in vision context. Do not call read_file or "
-        "browser_navigate to view it."
-    )
-    return note
