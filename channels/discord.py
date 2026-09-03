@@ -656,7 +656,7 @@ class DiscordChannel(BaseChannel):
         if image_url and image_url not in image_urls:
             image_urls.insert(0, image_url)
         if attachment_urls:
-            content_parts.extend(attachment_urls)
+            content_parts.extend(self._user_visible_attachment_urls(attachment_urls))
         content = "\n".join(part for part in content_parts if part)
         reply_context = await self._get_reply_context(message)
         if reply_context:
@@ -1151,6 +1151,13 @@ class DiscordChannel(BaseChannel):
                 attachment_urls.append(url)
 
         return image_url, attachment_urls
+
+    @staticmethod
+    def _user_visible_attachment_urls(attachment_urls: list[str]) -> list[str]:
+        """Keep leftover document URLs; do not dump image CDNs into user text."""
+        from core.tool_capability import is_image_locator
+
+        return [url for url in attachment_urls if not is_image_locator(url)]
 
     async def _send_typing(self, target, chat_id: str) -> None:
         session_key = _session_key("discord", chat_id)

@@ -12,7 +12,7 @@ leaner.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 
 # ── Module-level constants (re-exported so loop.py can import them) ───────
@@ -387,3 +387,20 @@ def normalize_tool_alias(
         }
 
     return mapped_name, normalized_args
+
+
+def preflight_tool_call(
+    function_name: str,
+    function_args: Optional[dict] = None,
+    *,
+    attachments: Optional[Iterable[Any]] = None,
+) -> Optional[str]:
+    """Refuse illegal tool/arg combos before any handler runs.
+
+    Returns a recoverable ``Error:`` string, or ``None`` if execute may proceed.
+    """
+    from core.tool_capability import refuse_illegal_tool_call
+
+    return refuse_illegal_tool_call(
+        function_name, function_args, attachments=attachments
+    )

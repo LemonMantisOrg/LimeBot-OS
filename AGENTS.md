@@ -154,6 +154,7 @@ Sandboxed OS interface. All methods check `_is_path_allowed()` before touching t
 - Hard-blocked filenames: `.env`, `limebot.json`, `config.py`, `secrets.py`, `package-lock.json`
 - Hard-blocked extensions: `.pem`, `.key`, `.p12`, `.pfx`
 - `.env*` prefix is blocked by pattern regardless of rest of filename
+- Host capability gate (`core/tool_capability.py`, via `preflight_tool_call`) refuses `read_file` on jpeg/png/gif/webp and `browser_navigate` to image URLs before execute. Chat-attached images are injected into vision and are not offered as filesystem reads.
 
 **Available tools:**
 
