@@ -24,6 +24,7 @@ from core.confirmation import (
 from core.rag_engine import RagEngine, AUTORAG_MIN_SCORE
 from core.tool_dispatcher import (
     normalize_tool_alias,
+    preflight_tool_call,
     TOOL_RESULT_LIMITS,
     DEFAULT_TOOL_RESULT_LIMIT,
     BROWSER_CACHEABLE,
@@ -115,6 +116,10 @@ from core.skills import SkillRegistry
 from core.subagents import SubagentRegistry, normalize_subagent_tool_name
 from core.tag_parser import process_tags
 from core.media_intent import exclusive_tools_for_turn
+from core.tool_capability import (
+    filter_tools_for_image_attachments,
+    strip_image_urls,
+)
 from core.tool_defs import shortlist_tool_definitions
 from core.tools import Toolbox
 from core.vectors import get_vector_service
@@ -487,6 +492,7 @@ class AgentLoop:
         self._recent_image_attachments: Dict[
             str, Tuple[float, List[Dict[str, Any]]]
         ] = {}
+        self._turn_attachments: Dict[str, List[Dict[str, Any]]] = {}
         self._workspace_changesets: Dict[str, Tuple[str, str]] = {}
 
     def _set_readiness_phase(self, phase: str) -> None:
@@ -838,6 +844,7 @@ class AgentLoop:
         user_text: str = "",
         forced_skill_name: Optional[str] = None,
         session_key: Optional[str] = None,
+        attachments: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict]:
         all_tools = self._get_tool_definitions()
         skill_registry = getattr(self, "skill_registry", None)
@@ -862,6 +869,10 @@ class AgentLoop:
         channel = ""
         if ":" in str(session_key or ""):
             channel = str(session_key).split(":", 1)[0]
+        if attachments is None and session_key:
+            attachments = list(
+                getattr(self, "_turn_attachments", {}).get(session_key) or []
+            )
         exclusive = exclusive_tools_for_turn(user_text, channel=channel)
         if exclusive is not None:
             selected = [
@@ -876,11 +887,16 @@ class AgentLoop:
                 user_text,
                 required_tool_names=required_tool_names,
                 channel=channel,
+                attachments=attachments,
             )
             strategy = "shortlist"
         else:
             selected = list(all_tools)
             strategy = "full_schema_default"
+
+        selected = filter_tools_for_image_attachments(
+            selected, user_text, attachments
+        )
 
         all_names = self._tool_definition_names(all_tools)
         selected_names = self._tool_definition_names(selected)
@@ -1121,8 +1137,10 @@ class AgentLoop:
                 note = f"[Attached image {image_count}: {name}]"
                 if mime_type:
                     note += f" Type: {mime_type}."
-                if path:
-                    note += f" Saved as `{path}`."
+                note += (
+                    " Already available in vision context — do not call "
+                    "read_file or browser_navigate to view it."
+                )
                 lines.append(note)
                 continue
 
@@ -2230,11 +2248,12 @@ class AgentLoop:
             return True
         if lowered.startswith(("/", "@")):
             return True
-        if re.search(r"https?://|www\.", raw, re.IGNORECASE):
+        inspectable = strip_image_urls(raw)
+        if re.search(r"https?://|www\.", inspectable, re.IGNORECASE):
             return True
-        if re.search(r"(?:[A-Za-z]:\\|(?:\./|\.\./|/|\\))", raw):
+        if re.search(r"(?:[A-Za-z]:\\|(?:\./|\.\./|/|\\))", inspectable):
             return True
-        return bool(re.search(r"\b[\w.-]+\.[A-Za-z0-9]{1,8}\b", raw))
+        return bool(re.search(r"\b[\w.-]+\.[A-Za-z0-9]{1,8}\b", inspectable))
 
     @staticmethod
     def _is_fast_casual_turn(content: str) -> bool:
@@ -2311,10 +2330,10 @@ class AgentLoop:
         )
         if not has_external_tool:
             return False
-        raw = str(content)
+        raw = strip_image_urls(str(content))
         if re.search(r"https?://|www\.", raw, re.IGNORECASE):
             return True
-        return bool(_EXPLICIT_TOOL_REQUEST_RE.search(raw))
+        return bool(_EXPLICIT_TOOL_REQUEST_RE.search(str(content)))
 
     @staticmethod
     def _build_provider_config(
@@ -4030,7 +4049,9 @@ class AgentLoop:
         elif tool_definitions_override is not None:
             tools = tool_definitions_override
         else:
-            tools = self._get_tool_definitions_for_turn(tool_context_text)
+            tools = self._get_tool_definitions_for_turn(
+                tool_context_text, session_key=session_key
+            )
         if model_override and model_override != "inherit":
             override_provider = self.llm_client.resolve_provider(
                 model_override,
@@ -5266,6 +5287,15 @@ class AgentLoop:
     async def _execute_tool(
         self, function_name: str, function_args: dict, session_key: str
     ) -> Any:
+        ctx = tool_context.get() or {}
+        refusal = preflight_tool_call(
+            function_name,
+            function_args,
+            attachments=ctx.get("attachments")
+            or getattr(self, "_turn_attachments", {}).get(session_key),
+        )
+        if refusal:
+            return refusal
 
         cached = self.tool_cache.get(function_name, function_args)
         if cached:
@@ -8249,6 +8279,7 @@ class AgentLoop:
                 for attachment in (msg.metadata.get("attachments") or [])
                 if isinstance(attachment, dict)
             ]
+            self._turn_attachments[session_key] = attachments
             self._remember_image_attachments(session_key, attachments)
             self._log_session_event(
                 session_key,
@@ -8989,6 +9020,7 @@ class AgentLoop:
                             content,
                             forced_skill_name=forced_skill_name,
                             session_key=session_key,
+                            attachments=attachments,
                         )
                         initial_tool_definitions = self._recovery_tool_definitions(
                             initial_tool_definitions, recovery_state

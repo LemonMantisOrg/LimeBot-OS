@@ -1316,7 +1316,9 @@ _NAMED_PAGE_RE = re.compile(
 
 def user_named_a_page(text: str) -> bool:
     """True when the user named a URL or asked to open/visit/go to a page."""
-    return bool(_NAMED_PAGE_RE.search(text or ""))
+    from core.tool_capability import strip_image_urls
+
+    return bool(_NAMED_PAGE_RE.search(strip_image_urls(text or "")))
 
 
 def _tokenize(text: str) -> set[str]:
@@ -1337,8 +1339,11 @@ def shortlist_tool_definitions(
     max_tools: int = 12,
     required_tool_names: Optional[Iterable[str]] = None,
     channel: str = "",
+    attachments: Optional[Iterable[Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Return a coherent subset of tools for the current user turn."""
+    from core.tool_capability import filter_tools_for_image_attachments
+
     text = (user_text or "").strip()
     exclusive = exclusive_tools_for_turn(text, channel=channel)
     if exclusive is not None:
@@ -1347,7 +1352,9 @@ def shortlist_tool_definitions(
             for tool in tool_defs
             if str(tool.get("function", {}).get("name") or "") in exclusive
         ]
-        return filtered or tool_defs
+        return filter_tools_for_image_attachments(
+            filtered or tool_defs, text, attachments
+        )
 
     if not text or len(tool_defs) <= max_tools:
         return tool_defs
@@ -1524,7 +1531,9 @@ def shortlist_tool_definitions(
     shortlisted = [
         tool for tool in tool_defs if tool.get("function", {}).get("name") in selected_set
     ]
-    return shortlisted or tool_defs
+    return filter_tools_for_image_attachments(
+        shortlisted or tool_defs, text, attachments
+    )
 
 
 def _expand_param(name: str, schema) -> dict:
